@@ -161,7 +161,7 @@ class DirectPublicProvider:
             now -= timedelta(days=1)
         return now.strftime("%Y%m%d")
 
-    def fetch(self) -> Dict[str, Any]:
+    def fetch(self, fast: bool = False) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from public_sources import fetch_sina_all_a, fetch_history_df, limit_pct
 
