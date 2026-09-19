@@ -93,7 +93,23 @@ async function runReview(){let b=$('reviewBtn');b.disabled=true;b.textContent='�
 
 function renderNews(d){let n=d.news||{},items=n.items||[];$('newsInfo').textContent=`${items.length} 条去重线索 · ${n.elapsed_ms||0}ms`;$('newsList').innerHTML=items.length?items.slice(0,28).map(x=>`<div class="news"><div class="src">${esc(x.source)}<br>#${x.rank}</div><div>${x.url?`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`:`<a>${esc(x.title)}</a>`}<div style="margin-top:4px">${(x.topics||[]).map(t=>`<span class="badge">${esc(t)}</span>`).join('')}</div></div><div class="sent ${x.sentiment==='positive'?'red':x.sentiment==='negative'?'green':''}">${x.sentiment==='positive'?'偏正':x.sentiment==='negative'?'偏负':'中性'}<br>${num(x.heat).toFixed(0)}</div></div>`).join(''):'<div class="label">新闻源暂无数据。</div>';let counts=Object.entries(n.source_counts||{}).map(([k,v])=>`${esc(k)}：${v}条`).join('<br>');let errors=(n.errors||[]).map(e=>`⚠ ${esc(e)}`).join('<br>');$('sourceHealth').innerHTML=(counts||'暂无源统计')+(errors?'<br><br>'+errors:'');let r=d.review||{};$('review').innerHTML=`<b>${esc(r.headline||'')}</b><br>${esc(r.money||'')}<br>${esc(r.relay||'')}<br>${esc(r.focus||'')}`}
 function renderAll(d){dashboard=d;renderMarket(d);renderHotspot(d);renderCandidates(d);renderNews(d);$('livePill').innerHTML=`<span class="dot" style="background:${d.is_live?'#2bd78d':'#ffbd4a'}"></span>${d.is_live?'实时行情':'回退/演示'}`;$('timePill').textContent=(d.updated_at||'').replace('T',' ').slice(0,19)}
-async function loadDashboard(fresh=false){$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>更新中';try{let url=`/api/dashboard?mode=${demoMode?'demo':'auto'}${fresh?'&fresh=true':''}`;let r=await fetch(url,{cache:'no-store'});let d=await r.json();renderAll(d)}catch(e){$('livePill').innerHTML='<span class="dot" style="background:#ff5d65"></span>加载失败';console.error(e)}}
+async function loadDashboard(fresh=false){
+  $('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>更新中';
+  // 公网版先在数秒内展示演示骨架，避免某一路实时源异常时整页一直空白。
+  if(!demoMode && !dashboard){
+    try{let dr=await fetch('/api/dashboard?mode=demo',{cache:'no-store'});if(dr.ok){let dd=await dr.json();renderAll(dd);$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>实时行情连接中';}}catch(_e){}
+  }
+  const ctrl=new AbortController(); const timer=setTimeout(()=>ctrl.abort(),25000);
+  try{
+    let url=`/api/dashboard?mode=${demoMode?'demo':'auto'}${fresh?'&fresh=true':''}`;
+    let r=await fetch(url,{cache:'no-store',signal:ctrl.signal}); let d=await r.json(); renderAll(d);
+    if(d.source_errors?.length){$('livePill').title='部分数据源失败：'+d.source_errors.join(' / ')}
+  }catch(e){
+    if(dashboard){$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>实时源超时·保留当前数据'}
+    else{$('livePill').innerHTML='<span class="dot" style="background:#ff5d65"></span>加载失败'}
+    console.error(e)
+  }finally{clearTimeout(timer)}
+}
 function toggleDemo(){demoMode=!demoMode;$('demoBtn').textContent=demoMode?'真实':'演示';loadDashboard(true)}
 function closeModal(){$('modal').classList.remove('show')}
 async function openStock(code,name){$('modal').classList.add('show');$('modalTitle').textContent=`${name} ${code}`;$('modalSub').textContent='正在加载近70个交易日K线…';if(charts.k){charts.k.dispose();charts.k=null}charts.k=echarts.init($('kchart'));charts.k.showLoading({color:'#8b76ff',textColor:'#8797ad',maskColor:'rgba(10,15,23,.5)'});try{let r=await fetch(`/api/stock/${code}`);let d=await r.json();charts.k.hideLoading();if(!d.rows?.length){$('modalSub').textContent=d.error||'暂无K线数据';return}let rows=d.rows;let dates=rows.map(x=>x.date),ohlc=rows.map(x=>[x.open,x.close,x.low,x.high]),vol=rows.map(x=>x.volume);$('modalSub').textContent='近70个交易日 · 前复权 · 点击候选仅用于量价核验';charts.k.setOption({animation:false,axisPointer:{link:[{xAxisIndex:'all'}]},tooltip:{trigger:'axis'},grid:[{left:48,right:14,top:25,height:'62%'},{left:48,right:14,top:'72%',height:'17%'}],xAxis:[{type:'category',data:dates,boundaryGap:true,axisLabel:{color:'#74849a',fontSize:9},axisLine:{lineStyle:{color:'#263249'}},min:'dataMin',max:'dataMax'},{type:'category',gridIndex:1,data:dates,axisLabel:{show:false},axisLine:{lineStyle:{color:'#263249'}},axisTick:{show:false}}],yAxis:[{scale:true,axisLabel:{color:'#74849a',fontSize:9},splitLine:{lineStyle:{color:'#1c2635'}}},{gridIndex:1,scale:true,axisLabel:{color:'#74849a',fontSize:9},splitLine:{show:false}}],dataZoom:[{type:'inside',xAxisIndex:[0,1],start:25,end:100}],series:[{name:'K',type:'candlestick',data:ohlc,itemStyle:{color:'#ff5d65',color0:'#2bd78d',borderColor:'#ff5d65',borderColor0:'#2bd78d'}},{name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,data:vol,itemStyle:{color:'#526987'}}]})}catch(e){charts.k.hideLoading();$('modalSub').textContent='K线接口暂不可用'}setTimeout(()=>charts.k&&charts.k.resize(),50)}

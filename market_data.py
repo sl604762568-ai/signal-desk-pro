@@ -8,8 +8,22 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
+import os
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+
+# Render 等云机房访问部分行情源时，requests 若没有 timeout 可能长时间挂起。
+# 给 AKShare 内部所有 requests 请求补一个默认连接/读取超时；显式 timeout 不覆盖。
+HTTP_TIMEOUT = float(os.getenv("MARKET_HTTP_TIMEOUT", "6"))
+if not getattr(requests.sessions.Session.request, "_signal_desk_timeout_patch", False):
+    _orig_session_request = requests.sessions.Session.request
+    def _signal_desk_request(self, method, url, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = (min(3.5, HTTP_TIMEOUT), HTTP_TIMEOUT)
+        return _orig_session_request(self, method, url, **kwargs)
+    _signal_desk_request._signal_desk_timeout_patch = True
+    requests.sessions.Session.request = _signal_desk_request
 
 
 def _num(v: Any, default: float = 0.0) -> float:

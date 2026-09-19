@@ -28,7 +28,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.1-review-chan")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.2-stable-data")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -103,7 +103,7 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
     candidates=build_candidates(market,news,hotspot,ak=ak,limit=12)
 
     payload={**market,"news":news,"hotspot":hotspot,"candidates":candidates,"model":{
-        "name":"热点×情绪×量价个股研究模型 v6.1","weights":{"量价":40,"热点新闻":25,"市场情绪":20,"强势结构":15},
+        "name":"热点×情绪×量价个股研究模型 v6.2","weights":{"量价":40,"热点新闻":25,"市场情绪":20,"强势结构":15},
         "note":"评分代表研究优先度，不预测涨跌，不构成交易指令。"
     }}
     return payload
@@ -172,7 +172,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.1-review-chan",
+        "version": "6.2-stable-data",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
