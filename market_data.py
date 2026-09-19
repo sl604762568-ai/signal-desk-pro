@@ -176,10 +176,11 @@ class DirectPublicProvider:
             "code":"代码", "name":"名称", "trade":"最新价", "changepercent":"涨跌幅",
             "settlement":"昨收", "open":"今开", "high":"最高", "low":"最低",
             "volume":"成交量", "amount":"成交额", "turnoverratio":"换手率",
+            "mktcap":"总市值", "nmc":"流通市值",
         }
         spot = spot.rename(columns={k:v for k,v in rename.items() if k in spot.columns}).copy()
         spot["代码"] = spot["代码"].astype(str).str.zfill(6)
-        for col in ["最新价","涨跌幅","昨收","今开","最高","最低","成交量","成交额","换手率"]:
+        for col in ["最新价","涨跌幅","昨收","今开","最高","最低","成交量","成交额","换手率","总市值","流通市值"]:
             if col in spot.columns:
                 spot[col] = pd.to_numeric(spot[col], errors="coerce")
             else:
@@ -276,6 +277,7 @@ class DirectPublicProvider:
                 "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":0.0,"turnover_rate":round(_num(r.get("换手率")),2),
                 "amount":_num(r.get("成交额")),"high":_num(r.get("最高")),"low":_num(r.get("最低")),
                 "open":_num(r.get("今开")),"prev_close":_num(r.get("昨收")),"industry":"",
+                "market_cap":_num(r.get("总市值"))*10000,"float_market_cap":_num(r.get("流通市值"))*10000,
             })
         # Include limit-up stocks omitted by liquidity filter.
         seen={x["code"] for x in active_stocks}
@@ -308,10 +310,27 @@ class DirectPublicProvider:
         for x in active_stocks:
             if x["code"] in vr_map: x["volume_ratio"]=round(vr_map[x["code"]],2)
 
+        # Review universe for short-term research: do NOT rank by absolute turnover amount.
+        # Favor moderate float cap, active turnover, tradable daily move and sufficient (not gigantic) liquidity.
         rv=spot.copy(); rv=rv[~rv["名称"].astype(str).str.upper().str.contains("ST|退",regex=True,na=False)]
-        rv=rv[(rv["成交额"].fillna(0)>=1.2e8) & (rv["涨跌幅"].fillna(-99)>=-6.5)]
-        rv["_rr"]=(rv["成交额"].fillna(0)/1e9).clip(0,20)*1.8 + rv["涨跌幅"].abs().fillna(0)*.35
-        rv=rv.sort_values("_rr",ascending=False).head(140)
+        rv=rv[(rv["成交额"].fillna(0)>=8e7) & (rv["涨跌幅"].fillna(-99)>=-2.5) & (rv["涨跌幅"].fillna(99)<=9.5)]
+        rv=rv[(rv["最新价"].fillna(0)>2.5) & (rv["最新价"].fillna(0)<=80)]
+        if "流通市值" in rv.columns:
+            cap_yi=rv["流通市值"].fillna(0)*10000/1e8
+            rv=rv[(cap_yi<=0) | ((cap_yi>=10) & (cap_yi<=320))]
+            cap_yi=rv["流通市值"].fillna(0)*10000/1e8
+        else:
+            cap_yi=pd.Series(0,index=rv.index,dtype=float)
+        amt_yi=rv["成交额"].fillna(0)/1e8
+        trv=rv["换手率"].fillna(0)
+        pctv=rv["涨跌幅"].fillna(0)
+        # bell-ish scores around practical ultra-short bands
+        amt_s=(100-(amt_yi-10).abs()*4.8).clip(0,100)
+        tr_s=(100-(trv-9).abs()*7.0).clip(0,100)
+        pct_s=(100-(pctv-4).abs()*11.0).clip(0,100)
+        cap_s=(100-(cap_yi-70).abs()*0.75).clip(0,100).where(cap_yi>0,55)
+        rv["_rr"]=amt_s*.25 + tr_s*.35 + pct_s*.20 + cap_s*.20
+        rv=rv.sort_values("_rr",ascending=False).head(280)
         review_universe=[]
         for _,r in rv.iterrows():
             review_universe.append({
@@ -319,6 +338,7 @@ class DirectPublicProvider:
                 "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":0.0,"turnover_rate":round(_num(r.get("换手率")),2),
                 "amount":_num(r.get("成交额")),"high":_num(r.get("最高")),"low":_num(r.get("最低")),
                 "open":_num(r.get("今开")),"prev_close":_num(r.get("昨收")),"industry":"",
+                "market_cap":_num(r.get("总市值"))*10000,"float_market_cap":_num(r.get("流通市值"))*10000,
             })
 
         quality = "full" if full_market else "partial"

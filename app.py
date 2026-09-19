@@ -32,7 +32,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.5-linked-next5-search")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.7-shortterm-elasticity")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -363,7 +363,11 @@ def analyze_one(code: str):
     try:
         from public_sources import fetch_history_df
         df, source=fetch_history_df(code, 140)
-        result=analyze_stock(df,code=code,name=name,industry=industry,event_hits=event_hits)
+        sent=data.get("sentiment") or {}
+        result=analyze_stock(
+            df, code=code, name=name, industry=industry, event_hits=event_hits,
+            market_score=sent.get("score"), market_stage=str(sent.get("stage", "")),
+        )
         result["source"]=source
         result["snapshot"]={k:info.get(k) for k in ["price","pct","amount","turnover_rate","volume_ratio","high","low","open","prev_close"]} if info else {}
         return JSONResponse(result)
@@ -389,7 +393,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.5-linked-next5-search",
+        "version": "6.7-shortterm-elasticity",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
