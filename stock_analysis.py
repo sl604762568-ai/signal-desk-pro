@@ -156,6 +156,72 @@ def chan_read(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+
+def _aggregate_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+    x["date"] = pd.to_datetime(x["date"], errors="coerce")
+    x = x.dropna(subset=["date"]).set_index("date").sort_index()
+    if x.empty:
+        return pd.DataFrame()
+    agg = x.resample("W-FRI").agg({
+        "open": "first", "high": "max", "low": "min", "close": "last",
+        "volume": "sum", "amount": "sum",
+    }).dropna(subset=["open", "close"]).reset_index()
+    agg["date"] = agg["date"].dt.strftime("%Y-%m-%d")
+    return agg
+
+
+def _trend_lines_from_pivots(pivs: List[Dict[str, Any]], offset: int = 0) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for typ, name in (("L", "上升支撑线"), ("H", "下降压力线")):
+        pts = [z for z in pivs if z.get("type") == typ]
+        if len(pts) < 2:
+            continue
+        a, b = pts[-2], pts[-1]
+        ia, ib = int(a["i"]), int(b["i"])
+        if ib <= ia:
+            continue
+        slope = (float(b["price"]) - float(a["price"])) / (ib - ia)
+        # Keep both lines; the UI labels whether slope is rising/falling.
+        out.append({
+            "name": name, "kind": "support" if typ == "L" else "resistance",
+            "start": ia - offset, "end": ib - offset,
+            "p1": round(float(a["price"]), 4), "p2": round(float(b["price"]), 4),
+            "slope": round(slope, 6),
+        })
+    return out
+
+def _frame_payload(df: pd.DataFrame, label: str, max_rows: int = 100) -> Dict[str, Any]:
+    if df is None or len(df) < 12:
+        return {"label": label, "rows": [], "chan": {"pivots": [], "centers": [], "center": None, "signals": [], "trendlines": []}, "summary": "数据不足"}
+    x = enrich_indicators(df.copy())
+    ch = chan_read(x)
+    offset = max(0, len(x) - max_rows)
+    rows = []
+    for _, r in x.tail(max_rows).iterrows():
+        rows.append({k: (str(r[k]) if k == "date" else round(n(r[k]), 4)) for k in ["date", "open", "close", "high", "low", "volume", "amount", "ma5", "ma10", "ma20", "ma60", "dif", "dea", "macd", "rsi14"]})
+    def rb(obj: Dict[str, Any]) -> Dict[str, Any]:
+        y = dict(obj)
+        for key in ("i", "start", "end"):
+            if key in y:
+                y[key] = int(y[key]) - offset
+        return y
+    center = ch.get("center")
+    chan_out = {
+        "pivots": [rb(z) for z in ch.get("pivots", []) if int(z.get("i", 0)) >= offset],
+        "centers": [rb(z) for z in ch.get("centers", []) if int(z.get("end", 0)) >= offset],
+        "center": rb(center) if center and int(center.get("end", 0)) >= offset else None,
+        "signals": [rb(z) for z in ch.get("signals", []) if int(z.get("i", 0)) >= offset],
+        "trendlines": [z for z in _trend_lines_from_pivots(ch.get("pivots", []), offset) if z["start"] >= 0],
+    }
+    last = x.iloc[-1]
+    price = n(last.close); ma20 = n(last.ma20); ma60 = n(last.ma60); dif=n(last.dif); dea=n(last.dea)
+    state = "偏强" if price > ma20 and ma20 >= ma60 and dif >= dea else "震荡" if price >= ma20 * .98 else "偏弱"
+    return {
+        "label": label, "rows": rows, "chan": chan_out,
+        "summary": f"{label}结构{state}：现价 {price:.2f}，MA20 {ma20:.2f}，MA60 {ma60:.2f}，MACD {'DIF≥DEA' if dif>=dea else 'DIF<DEA'}。",
+    }
+
 def _condition(label: str, ok: Optional[bool], detail: str) -> Dict[str, Any]:
     return {"label": label, "ok": ok, "detail": detail}
 
@@ -282,6 +348,12 @@ def analyze_stock(
         "centers": [rebased(z) for z in chan.get("centers", []) if int(z["end"]) >= offset],
         "center": rebased(center) if center and int(center["end"]) >= offset else None,
         "signals": [rebased(z) for z in chan["signals"] if int(z.get("i", 0)) >= offset],
+        "trendlines": [z for z in _trend_lines_from_pivots(chan.get("pivots", []), offset) if z["start"] >= 0],
+    }
+    weekly_df = _aggregate_weekly(df.tail(700))
+    timeframes = {
+        "daily": {"label": "日线·小级别", "rows": rows, "chan": chan_out, "summary": "日线用于当前结构与短线节奏确认。"},
+        "weekly": _frame_payload(weekly_df, "周线·大级别", 80),
     }
 
     return {
@@ -291,6 +363,6 @@ def analyze_stock(
         "signals": tech, "risks": risks, "chan": chan_out, "chan_text": chan_text,
         "chan_conditions": conditions, "signal_checks": checks,
         "support": support, "resistance": resistance, "scenarios": scenarios,
-        "events": event_hits or [], "rows": rows, "error": None,
+        "events": event_hits or [], "rows": rows, "timeframes": timeframes, "error": None,
         "note": "后续路径为条件情景分析，不是对未来价格的确定预测。缠论部分为机械近似，需人工核对分型、笔、线段和中枢。",
     }

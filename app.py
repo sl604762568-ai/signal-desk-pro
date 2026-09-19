@@ -25,6 +25,7 @@ from stock_selector import build_candidates
 from review_selector import build_review_picks
 from stock_analysis import analyze_stock
 from nextday_selector import build_next5
+from sector_engine import build_sector_review, fetch_board_members, sector_context_for_stock
 
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
@@ -32,7 +33,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.7-shortterm-elasticity")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.8-sector-rotation")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -68,6 +69,11 @@ def init_db() -> None:
         conn.execute("""CREATE TABLE IF NOT EXISTS daily_snapshots(
             trade_date TEXT PRIMARY KEY, captured_at TEXT NOT NULL, score REAL NOT NULL,
             stage TEXT NOT NULL, payload TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS sector_snapshots(
+            trade_date TEXT NOT NULL, board_code TEXT NOT NULL, board_name TEXT NOT NULL,
+            heat REAL NOT NULL, pct REAL NOT NULL, breadth REAL NOT NULL, main_net_pct REAL NOT NULL,
+            board_type TEXT NOT NULL, captured_at TEXT NOT NULL,
+            PRIMARY KEY(trade_date, board_code))""")
         conn.commit()
 
 
@@ -86,6 +92,31 @@ def load_history(limit: int = 20) -> List[Dict[str, Any]]:
     with sqlite3.connect(DB_PATH) as conn:
         rows=conn.execute("SELECT trade_date,score,stage FROM daily_snapshots ORDER BY trade_date DESC LIMIT ?",(limit,)).fetchall()
     return [{"date":r[0],"score":r[1],"stage":r[2]} for r in reversed(rows)]
+
+
+def save_sector_snapshots(trade_date: str, sectors: List[Dict[str, Any]]) -> None:
+    if not trade_date or not sectors:
+        return
+    now = datetime.now(CN_TZ).isoformat(timespec="seconds")
+    with sqlite3.connect(DB_PATH) as conn:
+        for x in sectors[:40]:
+            conn.execute("""INSERT INTO sector_snapshots(trade_date,board_code,board_name,heat,pct,breadth,main_net_pct,board_type,captured_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(trade_date,board_code) DO UPDATE SET board_name=excluded.board_name,heat=excluded.heat,pct=excluded.pct,breadth=excluded.breadth,main_net_pct=excluded.main_net_pct,board_type=excluded.board_type,captured_at=excluded.captured_at""",
+                (trade_date, x.get("code"), x.get("name"), float(x.get("heat") or 0), float(x.get("pct") or 0), float(x.get("breadth") or 0), float(x.get("main_net_pct") or 0), x.get("type") or "", now))
+        conn.commit()
+
+def load_sector_rotation(days: int = 8) -> Dict[str, Any]:
+    with sqlite3.connect(DB_PATH) as conn:
+        ds = conn.execute("SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT ?", (days,)).fetchall()
+        dates = [x[0] for x in reversed(ds)]
+        timeline=[]
+        for d in dates:
+            rows=conn.execute("SELECT board_code,board_name,heat,pct,breadth,main_net_pct,board_type FROM sector_snapshots WHERE trade_date=? ORDER BY heat DESC LIMIT 3", (d,)).fetchall()
+            if not rows: continue
+            top=[{"code":r[0],"name":r[1],"heat":r[2],"pct":r[3],"breadth":r[4],"main_net_pct":r[5],"type":r[6]} for r in rows]
+            timeline.append({"date":d,"leader":top[0],"top3":top})
+    return {"timeline":timeline,"path":" → ".join(x["leader"]["name"] for x in timeline),"source":"本网站每日收盘板块快照","note":"随着网站每日收盘运行，流转路径会逐日积累并优先使用真实收盘快照。"}
 
 
 def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
@@ -352,27 +383,80 @@ def analyze_one(code: str):
     for s in (data.get("review_universe") or data.get("active_stocks") or []):
         if str(s.get("code","")).zfill(6)==code:
             info=s; break
-    name=str(info.get("name", "")); industry=str(info.get("industry", ""))
     news=data.get("news") or {}
+    try:
+        relation=sector_context_for_stock(code, news=news)
+    except Exception as exc:
+        relation={"profile":{"code":code,"name":"","industry":"","concepts":[],"error":str(exc)},"memberships":[]}
+    profile=relation.get("profile") or {}
+    name=str(info.get("name") or profile.get("name") or "")
+    industry=str(profile.get("industry") or info.get("industry") or "")
+    relation_names=[x.get("name") for x in relation.get("memberships") or [] if x.get("name")]
     event_hits=[]
-    for item in (news.get("items") or [])[:120]:
+    for item in (news.get("items") or [])[:160]:
         title=str(item.get("title", ""))
-        if (name and name in title) or (industry and industry in title):
+        if (name and name in title) or (industry and industry in title) or any(rn and rn in title for rn in relation_names[:12]):
             event_hits.append(title)
-        if len(event_hits)>=6: break
+        if len(event_hits)>=8: break
     try:
         from public_sources import fetch_history_df
-        df, source=fetch_history_df(code, 140)
+        df, source=fetch_history_df(code, 180)
         sent=data.get("sentiment") or {}
         result=analyze_stock(
             df, code=code, name=name, industry=industry, event_hits=event_hits,
             market_score=sent.get("score"), market_stage=str(sent.get("stage", "")),
         )
         result["source"]=source
-        result["snapshot"]={k:info.get(k) for k in ["price","pct","amount","turnover_rate","volume_ratio","high","low","open","prev_close"]} if info else {}
+        result["snapshot"]={k:info.get(k) for k in ["price","pct","amount","turnover_rate","volume_ratio","high","low","open","prev_close","market_cap","float_market_cap"]} if info else {}
+        result["sector_relations"]=relation.get("memberships") or []
+        hotrels=[x for x in result["sector_relations"] if x.get("heat") is not None]
+        result["industry_analysis"]={
+            "industry":industry,
+            "hot_memberships":hotrels[:8],
+            "summary": (f"当前可核验到 {len(result['sector_relations'])} 个行业/概念关系；其中热度最高的是 {hotrels[0]['name']}（热度 {hotrels[0]['heat']:.1f}，板块排名 {hotrels[0]['rank']}）。" if hotrels else f"当前可核验到 {len(result['sector_relations'])} 个行业/概念关系，暂无对应板块热度快照。"),
+            "relation_source":profile.get("source") or "东方财富个股行业/概念关系",
+        }
+        result["company_analysis"]={
+            "name":name,"code":code,"industry":industry,
+            "concepts":[x.get("name") for x in profile.get("concepts") or [] if x.get("name")][:20],
+            "market_cap": profile.get("market_cap") or info.get("market_cap"),
+            "float_market_cap": profile.get("float_market_cap") or info.get("float_market_cap"),
+            "activity": {"amount":info.get("amount"),"turnover_rate":info.get("turnover_rate"),"volume_ratio":info.get("volume_ratio")},
+            "summary":"公司分析先展示真实行业/概念归属、流动性和交易活跃度；不根据公司名称猜题材。基本面财报深挖可在后续版本继续接入。",
+        }
         return JSONResponse(result)
     except Exception as exc:
-        return JSONResponse({"code":code,"name":name,"rows":[],"error":f"单股分析失败：{type(exc).__name__}: {exc}"})
+        return JSONResponse({"code":code,"name":name,"rows":[],"sector_relations":relation.get("memberships") or [],"error":f"单股分析失败：{type(exc).__name__}: {exc}"})
+
+@app.get("/api/sector-review")
+def sector_review(limit: int=Query(12,ge=6,le=24)):
+    _harvest_refresh()
+    data=_live_cache.get("data") or {}
+    news=data.get("news") or {}
+    try:
+        out=build_sector_review(news=news, limit=limit)
+        trade_date=str(data.get("trade_date") or datetime.now(CN_TZ).date().isoformat())
+        save_sector_snapshots(trade_date, out.get("sectors") or [])
+        stored=load_sector_rotation(8)
+        if len(stored.get("timeline") or []) >= 2:
+            out["rotation_sample"] = out.get("rotation")
+            out["rotation"] = stored
+        out["trade_date"] = trade_date
+        return JSONResponse(out)
+    except Exception as exc:
+        return JSONResponse({"sectors":[],"rotation":{"timeline":[],"path":""},"error":f"板块复盘失败：{type(exc).__name__}: {exc}"})
+
+@app.get("/api/sector/{board_code}")
+def sector_detail(board_code: str, limit: int=Query(200,ge=20,le=500)):
+    board_code=board_code.strip().upper()
+    try:
+        members=fetch_board_members(board_code, limit=limit)
+        review=build_sector_review(news=(_live_cache.get("data") or {}).get("news") or {}, limit=24)
+        board=next((x for x in review.get("sectors") or [] if x.get("code")==board_code), None)
+        return JSONResponse({"board":board or {"code":board_code},"members":members,"count":len(members),"relation_source":"东方财富板块成分关系","note":"成分股来自板块关系接口，不根据公司名称关键词推断。"})
+    except Exception as exc:
+        return JSONResponse({"board":{"code":board_code},"members":[],"count":0,"error":f"板块成分股失败：{type(exc).__name__}: {exc}"})
+
 
 @app.get("/api/sources")
 def sources_probe():
@@ -393,7 +477,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.7-shortterm-elasticity",
+        "version": "6.8-sector-rotation",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

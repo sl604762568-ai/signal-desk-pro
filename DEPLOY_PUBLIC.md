@@ -38,3 +38,10 @@
 打开 `/api/dashboard`。它不会再同步等待外部源；冷启动时先返回结构/缓存，然后后台刷新。网页会自动轮询。
 
 如果首页仍显示旧界面，请按 `Ctrl+F5` 强制刷新一次。v6.4 已升级 Service Worker 并自动删除旧缓存。
+
+
+## v6.8 部署后检查
+
+- `/api/health` 应显示 `6.8-sector-rotation`。
+- `/api/sector-review` 应返回 `sectors` 与 `rotation`。
+- 点击任意板块后 `/api/sector/BKxxxx` 应返回真实成分股。

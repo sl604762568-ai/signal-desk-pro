@@ -1,4 +1,4 @@
-const CACHE='signal-desk-v6-6';
+const CACHE='signal-desk-v6-8';
 const ASSETS=['/','/manifest.webmanifest','/icon.svg'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(Promise.all([
