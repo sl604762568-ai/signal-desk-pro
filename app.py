@@ -23,6 +23,8 @@ from news_data import build_news_radar, demo_news_radar
 from sentiment import build_alerts, build_review, score_sentiment
 from stock_selector import build_candidates
 from review_selector import build_review_picks
+from stock_analysis import analyze_stock
+from nextday_selector import build_next5
 
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
@@ -30,7 +32,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.4.2-js-syntax-fix")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.5-linked-next5-search")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -308,6 +310,66 @@ def stock_detail(code: str):
     except Exception as exc:
         return JSONResponse({"code":code,"rows":[],"error":f"{type(exc).__name__}: {exc}"})
 
+
+@app.get("/api/next5")
+def next5():
+    _harvest_refresh()
+    data=_live_cache.get("data")
+    if not data:
+        _start_refresh(force=False)
+        return JSONResponse({"environment":{},"picks":[],"scanned":0,"error":"真实行情尚未准备好，请稍后再试。"})
+    try:
+        from public_sources import fetch_history_df
+        result=build_next5(data, data.get("news") or {}, fetch_history_df, limit=5)
+        result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"environment":{},"picks":[],"scanned":0,"error":f"次日联动筛选失败：{type(exc).__name__}: {exc}"})
+
+@app.get("/api/search")
+def search_stock(q: str=Query("", min_length=1, max_length=32), limit: int=Query(12,ge=1,le=30)):
+    _harvest_refresh()
+    data=_live_cache.get("data") or {}
+    items=(data.get("review_universe") or data.get("active_stocks") or [])
+    key=q.strip().lower()
+    out=[]
+    for s in items:
+        code=str(s.get("code","")).zfill(6); name=str(s.get("name","")).strip()
+        if key in code.lower() or key in name.lower():
+            out.append({"code":code,"name":name,"industry":s.get("industry","") or "","price":s.get("price"),"pct":s.get("pct")})
+        if len(out)>=limit: break
+    # Exact six-digit code remains analyzable even if it is not in the current snapshot.
+    if not out and q.strip().isdigit() and len(q.strip())<=6:
+        out.append({"code":q.strip().zfill(6),"name":"","industry":"","price":None,"pct":None})
+    return {"q":q,"items":out}
+
+@app.get("/api/analyze/{code}")
+def analyze_one(code: str):
+    code=''.join(ch for ch in code if ch.isdigit())[:6].zfill(6)
+    _harvest_refresh()
+    data=_live_cache.get("data") or {}
+    info={}
+    for s in (data.get("review_universe") or data.get("active_stocks") or []):
+        if str(s.get("code","")).zfill(6)==code:
+            info=s; break
+    name=str(info.get("name", "")); industry=str(info.get("industry", ""))
+    news=data.get("news") or {}
+    event_hits=[]
+    for item in (news.get("items") or [])[:120]:
+        title=str(item.get("title", ""))
+        if (name and name in title) or (industry and industry in title):
+            event_hits.append(title)
+        if len(event_hits)>=6: break
+    try:
+        from public_sources import fetch_history_df
+        df, source=fetch_history_df(code, 140)
+        result=analyze_stock(df,code=code,name=name,industry=industry,event_hits=event_hits)
+        result["source"]=source
+        result["snapshot"]={k:info.get(k) for k in ["price","pct","amount","turnover_rate","volume_ratio","high","low","open","prev_close"]} if info else {}
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"code":code,"name":name,"rows":[],"error":f"单股分析失败：{type(exc).__name__}: {exc}"})
+
 @app.get("/api/sources")
 def sources_probe():
     from public_sources import probe_sources
@@ -327,7 +389,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.4.2-js-syntax-fix",
+        "version": "6.5-linked-next5-search",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
