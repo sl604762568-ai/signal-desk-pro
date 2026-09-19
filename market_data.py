@@ -122,6 +122,7 @@ class DemoProvider:
             "concepts": concepts,
             "auction": auction,
             "active_stocks": active_stocks,
+            "review_universe": active_stocks,
             "limitup_stocks": limitup_stocks,
         }
 
@@ -155,12 +156,30 @@ class AKShareProvider:
         now = datetime.now(CN_TZ)
         date = self._latest_trade_date()
 
-        zt = ak.stock_zt_pool_em(date=date)
-        zbgc = ak.stock_zt_pool_zbgc_em(date=date)
-        dtgc = ak.stock_zt_pool_dtgc_em(date=date)
-        prev = ak.stock_zt_pool_previous_em(date=date)
-        spot = ak.stock_zh_a_spot_em()
-        concept = ak.stock_board_concept_name_em()
+        errors: List[str] = []
+        def safe_df(label, fn):
+            try:
+                df = fn()
+                return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+            except Exception as exc:
+                errors.append(f"{label}:{type(exc).__name__}")
+                return pd.DataFrame()
+
+        # 单个源失败不再拖垮整个工作台。
+        zt = safe_df("涨停池", lambda: ak.stock_zt_pool_em(date=date))
+        zbgc = safe_df("炸板池", lambda: ak.stock_zt_pool_zbgc_em(date=date))
+        dtgc = safe_df("跌停池", lambda: ak.stock_zt_pool_dtgc_em(date=date))
+        prev = safe_df("昨日涨停", lambda: ak.stock_zt_pool_previous_em(date=date))
+        concept = safe_df("概念板块", lambda: ak.stock_board_concept_name_em())
+
+        spot_source = "东方财富"
+        spot = safe_df("全A东财", lambda: ak.stock_zh_a_spot_em())
+        # 东财在部分云机房可能超时，改用新浪全A做第二路回退。新浪字段已经被 AKShare 标准化。
+        if spot.empty or "代码" not in spot.columns or "涨跌幅" not in spot.columns:
+            spot_source = "新浪"
+            spot = safe_df("全A新浪", lambda: ak.stock_zh_a_spot())
+        if spot.empty:
+            raise RuntimeError("全A实时行情两路均不可用：" + ",".join(errors[-4:]))
 
         zt_count = int(len(zt))
         zb_count = int(len(zbgc))
@@ -285,6 +304,33 @@ class AKShareProvider:
                     "prev_close": _num(r.get("昨收")), "industry": ind_map.get(code, ""),
                 })
 
+        # 复盘选股使用更宽的流动性股票池：不要求当日上涨，避免漏掉缩量回踩/缠论二买。
+        review_universe: List[Dict[str, Any]] = []
+        if not spot.empty and "代码" in spot.columns:
+            rv = spot.copy()
+            for col in ["涨跌幅","量比","换手率","成交额","最新价","最高","最低","今开","昨收"]:
+                if col in rv.columns:
+                    rv[col] = pd.to_numeric(rv[col], errors="coerce")
+            if "名称" in rv.columns:
+                rv = rv[~rv["名称"].astype(str).str.upper().str.contains("ST", na=False)]
+            if "成交额" in rv.columns and "涨跌幅" in rv.columns:
+                rv = rv[(rv["成交额"].fillna(0) >= 1.2e8) & (rv["涨跌幅"].fillna(-99) >= -6.0) & (rv["涨跌幅"].fillna(99) <= 10.5)]
+                # 先按流动性+活跃度压缩到可承受的历史K请求规模。
+                rv["_rr"] = (rv["成交额"].fillna(0)/1e9).clip(0,20) * 1.8 + rv["涨跌幅"].abs().fillna(0) * .35
+                rv = rv.sort_values("_rr", ascending=False).head(180)
+            ind_map2 = {}
+            if not zt.empty and "代码" in zt.columns and "所属行业" in zt.columns:
+                ind_map2 = {str(r.get("代码","")).zfill(6): str(r.get("所属行业", "")) for _, r in zt.iterrows()}
+            for _, r in rv.iterrows():
+                code = str(r.get("代码", "")).zfill(6)
+                review_universe.append({
+                    "code": code, "name": str(r.get("名称", "")), "price": round(_num(r.get("最新价")), 3),
+                    "pct": round(_num(r.get("涨跌幅")), 2), "volume_ratio": round(_num(r.get("量比")), 2),
+                    "turnover_rate": round(_num(r.get("换手率")), 2), "amount": _num(r.get("成交额")),
+                    "high": _num(r.get("最高")), "low": _num(r.get("最低")), "open": _num(r.get("今开")),
+                    "prev_close": _num(r.get("昨收")), "industry": ind_map2.get(code, ""),
+                })
+
         limitup_stocks: List[Dict[str, Any]] = []
         if not zt.empty:
             for _, r in zt.head(100).iterrows():
@@ -318,8 +364,9 @@ class AKShareProvider:
             })
 
         return {
-            "source": self.name,
+            "source": f"AKShare / {spot_source}",
             "is_live": True,
+            "source_errors": errors,
             "trade_date": datetime.strptime(date, "%Y%m%d").strftime("%Y-%m-%d"),
             "updated_at": now.isoformat(timespec="seconds"),
             "market_status": _market_status(now),
@@ -340,6 +387,7 @@ class AKShareProvider:
             "concepts": concepts,
             "auction": auction,
             "active_stocks": active_stocks,
+            "review_universe": review_universe,
             "limitup_stocks": limitup_stocks,
         }
 

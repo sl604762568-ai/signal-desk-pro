@@ -20,6 +20,7 @@ from market_data import get_provider
 from news_data import build_news_radar, demo_news_radar
 from sentiment import build_alerts, build_review, score_sentiment
 from stock_selector import build_candidates
+from review_selector import build_review_picks
 
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
@@ -27,7 +28,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="4.0-public")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.1-review-chan")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -102,7 +103,7 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
     candidates=build_candidates(market,news,hotspot,ak=ak,limit=12)
 
     payload={**market,"news":news,"hotspot":hotspot,"candidates":candidates,"model":{
-        "name":"热点×情绪×量价研究模型 v3","weights":{"量价":40,"热点新闻":25,"市场情绪":20,"强势结构":15},
+        "name":"热点×情绪×量价个股研究模型 v6.1","weights":{"量价":40,"热点新闻":25,"市场情绪":20,"强势结构":15},
         "note":"评分代表研究优先度，不预测涨跌，不构成交易指令。"
     }}
     return payload
@@ -128,6 +129,21 @@ def dashboard(mode: str=Query("auto",pattern="^(auto|demo)$"), fresh: bool=False
             return JSONResponse(_cache["data"])
         data=build_dashboard(force_demo=(mode=="demo")); _cache.update({"ts":now,"data":data,"mode":key})
         return JSONResponse(data)
+
+@app.get("/api/review-picks")
+def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
+    # 复用dashboard行情/新闻；扫描历史日线按按钮触发，避免首页每次加载都产生大量请求。
+    data=build_dashboard(force_demo=(mode=="demo"))
+    if not data.get("is_live"):
+        return JSONResponse({"regime": {"level":"--","score":0,"note":"实时行情不可用"}, "picks":[], "chan_picks":[], "scanned":0, "error":"真实行情源暂不可用，复盘选股不输出虚构个股。"})
+    try:
+        import akshare as ak
+        result=build_review_picks(data, data.get("news") or {}, ak=ak, limit=limit)
+        result["trade_date"]=data.get("trade_date")
+        result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"regime":{},"picks":[],"chan_picks":[],"scanned":0,"error":f"复盘选股失败：{type(exc).__name__}: {exc}"})
 
 @app.get("/api/stock/{code}")
 def stock_detail(code: str):
@@ -156,7 +172,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "4.0-public",
+        "version": "6.1-review-chan",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
