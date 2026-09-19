@@ -104,6 +104,12 @@ async function loadDashboard(fresh=false){
     let url=`/api/dashboard?mode=${demoMode?'demo':'auto'}${fresh?'&fresh=true':''}`;
     let r=await fetch(url,{cache:'no-store',signal:ctrl.signal}); let d=await r.json(); renderAll(d);
     if(d.source_errors?.length){$('livePill').title='部分数据源失败：'+d.source_errors.join(' / ')}
+    if(!demoMode && !d.is_live){
+      const rs=d.refresh_status||{};
+      if(rs.state==='running'){$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>后台连接真实行情';setTimeout(()=>loadDashboard(false),7000)}
+      else if(rs.state==='timeout'){$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>实时源超时·页面可继续使用';$('livePill').title=rs.error||''}
+      else if(rs.state==='error'){$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>实时源异常·页面可继续使用';$('livePill').title=rs.error||''}
+    }
   }catch(e){
     if(dashboard){$('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>实时源超时·保留当前数据'}
     else{$('livePill').innerHTML='<span class="dot" style="background:#ff5d65"></span>加载失败'}

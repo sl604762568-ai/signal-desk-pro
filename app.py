@@ -5,6 +5,8 @@ import os
 import sqlite3
 import threading
 import time
+import multiprocessing as mp
+import queue as queue_mod
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -28,11 +30,22 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.2-stable-data")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.3-nonblocking")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
 _lock = threading.Lock()
+
+# 真实行情不再占用 HTTP 请求线程。后台独立进程最多运行 LIVE_REFRESH_TIMEOUT 秒；
+# 即使第三方 SDK 永久卡住，也能被主进程终止。
+LIVE_REFRESH_TIMEOUT = int(os.getenv("LIVE_REFRESH_TIMEOUT", "18"))
+LIVE_RETRY_COOLDOWN = int(os.getenv("LIVE_RETRY_COOLDOWN", "30"))
+_live_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+_refresh: Dict[str, Any] = {
+    "process": None, "queue": None, "started": 0.0, "last_attempt": 0.0,
+    "state": "idle", "error": None, "elapsed": None,
+}
+_mp_ctx = mp.get_context("spawn")
 
 
 @app.middleware("http")
@@ -109,8 +122,96 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
     return payload
 
 
+
+def _live_worker(out_q) -> None:
+    """子进程内执行可能阻塞的所有真实数据抓取。"""
+    try:
+        data = build_dashboard(force_demo=False)
+        out_q.put({"ok": True, "data": data})
+    except BaseException as exc:
+        out_q.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _harvest_refresh() -> None:
+    proc = _refresh.get("process")
+    q = _refresh.get("queue")
+    if proc is None:
+        return
+
+    # Queue 有结果时优先收割，不等待子进程自然退出。
+    msg = None
+    if q is not None:
+        try:
+            msg = q.get_nowait()
+        except queue_mod.Empty:
+            pass
+        except Exception:
+            pass
+    if msg is not None:
+        elapsed = round(time.time() - float(_refresh.get("started") or time.time()), 2)
+        if msg.get("ok") and isinstance(msg.get("data"), dict):
+            _live_cache.update({"ts": time.time(), "data": msg["data"]})
+            _refresh.update({"state": "ok", "error": None, "elapsed": elapsed})
+        else:
+            _refresh.update({"state": "error", "error": msg.get("error") or "unknown", "elapsed": elapsed})
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=1)
+        _refresh["process"] = None
+        _refresh["queue"] = None
+        return
+
+    # 硬超时：直接终止整个抓取进程，而不是继续等第三方接口。
+    elapsed = time.time() - float(_refresh.get("started") or time.time())
+    if proc.is_alive() and elapsed > LIVE_REFRESH_TIMEOUT:
+        proc.terminate()
+        proc.join(timeout=2)
+        _refresh.update({
+            "process": None, "queue": None, "state": "timeout",
+            "error": f"真实行情后台刷新超过 {LIVE_REFRESH_TIMEOUT}s，已强制终止",
+            "elapsed": round(elapsed, 2),
+        })
+        return
+
+    if not proc.is_alive():
+        proc.join(timeout=0.2)
+        _refresh.update({"process": None, "queue": None})
+        if _refresh.get("state") == "running":
+            _refresh.update({"state": "error", "error": "真实行情子进程提前退出且未返回数据"})
+
+
+def _start_refresh(force: bool = False) -> None:
+    _harvest_refresh()
+    proc = _refresh.get("process")
+    if proc is not None and proc.is_alive():
+        return
+    now = time.time()
+    if not force and now - float(_refresh.get("last_attempt") or 0) < LIVE_RETRY_COOLDOWN:
+        return
+    q = _mp_ctx.Queue(maxsize=1)
+    p = _mp_ctx.Process(target=_live_worker, args=(q,), daemon=True)
+    p.start()
+    _refresh.update({
+        "process": p, "queue": q, "started": now, "last_attempt": now,
+        "state": "running", "error": None, "elapsed": None,
+    })
+
+
+def _refresh_meta() -> Dict[str, Any]:
+    _harvest_refresh()
+    return {
+        "state": _refresh.get("state"),
+        "error": _refresh.get("error"),
+        "elapsed": _refresh.get("elapsed"),
+        "timeout_seconds": LIVE_REFRESH_TIMEOUT,
+        "has_live_cache": bool(_live_cache.get("data")),
+        "live_cache_age": round(time.time() - float(_live_cache.get("ts") or time.time()), 1) if _live_cache.get("data") else None,
+    }
+
+
 @app.on_event("startup")
-def _startup(): init_db()
+def _startup():
+    init_db()
 
 @app.get("/")
 def index(): return FileResponse(STATIC/"index.html")
@@ -123,12 +224,44 @@ def icon(): return FileResponse(STATIC/"icon.svg", media_type="image/svg+xml")
 
 @app.get("/api/dashboard")
 def dashboard(mode: str=Query("auto",pattern="^(auto|demo)$"), fresh: bool=False):
-    now=time.time(); key=mode
-    with _lock:
-        if not fresh and _cache.get("data") is not None and _cache.get("mode")==key and now-float(_cache.get("ts",0))<CACHE_SECONDS:
-            return JSONResponse(_cache["data"])
-        data=build_dashboard(force_demo=(mode=="demo")); _cache.update({"ts":now,"data":data,"mode":key})
+    now = time.time()
+    if mode == "demo":
+        with _lock:
+            if (not fresh and _cache.get("data") is not None and _cache.get("mode") == "demo"
+                    and now - float(_cache.get("ts", 0)) < CACHE_SECONDS):
+                data = dict(_cache["data"])
+            else:
+                data = build_dashboard(force_demo=True)
+                _cache.update({"ts": now, "data": data, "mode": "demo"})
+        data = dict(data)
+        data["refresh_status"] = _refresh_meta()
         return JSONResponse(data)
+
+    # AUTO 模式永不直接执行网络抓取。先收割后台结果，再按需触发后台刷新。
+    _harvest_refresh()
+    live = _live_cache.get("data")
+    live_age = now - float(_live_cache.get("ts") or 0) if live else 10**9
+    if fresh or live is None or live_age >= CACHE_SECONDS:
+        _start_refresh(force=fresh)
+
+    if live is not None:
+        data = dict(live)
+        data["refresh_status"] = _refresh_meta()
+        data["served_from"] = "live-cache"
+        return JSONResponse(data)
+
+    # 冷启动期间立即返回演示/结构数据，前端随后轮询拿真实结果。
+    with _lock:
+        if (_cache.get("data") is not None and _cache.get("mode") == "demo"
+                and now - float(_cache.get("ts", 0)) < CACHE_SECONDS):
+            data = dict(_cache["data"])
+        else:
+            data = build_dashboard(force_demo=True)
+            _cache.update({"ts": now, "data": data, "mode": "demo"})
+    data["refresh_status"] = _refresh_meta()
+    data["served_from"] = "instant-fallback"
+    data["notice"] = "真实行情正在后台刷新；本次请求没有等待第三方接口。"
+    return JSONResponse(data)
 
 @app.get("/api/review-picks")
 def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
@@ -172,8 +305,9 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.2-stable-data",
+        "version": "6.3-nonblocking",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
+        "refresh": _refresh_meta(),
     }
