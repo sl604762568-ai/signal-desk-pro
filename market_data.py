@@ -61,7 +61,7 @@ def _df_records(df: Optional[pd.DataFrame], limit: int = 100) -> List[Dict[str, 
 class DemoProvider:
     name = "演示数据"
 
-    def fetch(self) -> Dict[str, Any]:
+    def fetch(self, fast: bool = False) -> Dict[str, Any]:
         now = datetime.now(CN_TZ)
         # 小幅随机，保持页面刷新时有动态感。
         zt = random.randint(48, 76)
@@ -212,7 +212,9 @@ class DirectPublicProvider:
         zt_count=len(zt); dt_count=len(dtgc); zb_count=len(zbgc)
         seal_rate=round(zt_count/max(1,zt_count+zb_count)*100,1)
 
-        # Consecutive-limit estimate for today's limit-up names, using direct Tencent/Sina K-lines.
+        # Consecutive-limit estimate is expensive because it needs per-stock history.
+        # On the dashboard fast path, publish the real all-A snapshot first and defer
+        # this enrichment to on-demand review/stock-analysis endpoints.
         board_map: Dict[str,int] = {}
         board_errors=[]
         def board_work(row):
@@ -233,7 +235,7 @@ class DirectPublicProvider:
                 return code,max(1,consec)
             except Exception as exc:
                 return code,1
-        if not zt.empty:
+        if not fast and not zt.empty:
             rows=zt.to_dict("records")[:36]
             with ThreadPoolExecutor(max_workers=8) as ex:
                 futs=[ex.submit(board_work,r) for r in rows]
@@ -242,6 +244,8 @@ class DirectPublicProvider:
                         c,b=fut.result(); board_map[c]=b
                     except Exception as exc:
                         board_errors.append(type(exc).__name__)
+        if fast and not zt.empty:
+            board_map={str(r.get("代码","")).zfill(6):1 for _,r in zt.iterrows()}
         max_board=max(board_map.values(), default=(1 if zt_count else 0))
 
         ladder=[]
@@ -303,12 +307,13 @@ class DirectPublicProvider:
                 prev5=float(v.iloc[-6:-1].mean()); return x["code"],(float(v.iloc[-1])/prev5 if prev5>0 else 0.0)
             except Exception:return x["code"],0.0
         vr_map={}
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            futs=[ex.submit(vr_work,x) for x in active_stocks[:32]]
-            for fut in as_completed(futs):
-                c,v=fut.result(); vr_map[c]=v
-        for x in active_stocks:
-            if x["code"] in vr_map: x["volume_ratio"]=round(vr_map[x["code"]],2)
+        if not fast:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                futs=[ex.submit(vr_work,x) for x in active_stocks[:32]]
+                for fut in as_completed(futs):
+                    c,v=fut.result(); vr_map[c]=v
+            for x in active_stocks:
+                if x["code"] in vr_map: x["volume_ratio"]=round(vr_map[x["code"]],2)
 
         # Review universe for short-term research: do NOT rank by absolute turnover amount.
         # Favor moderate float cap, active turnover, tradable daily move and sufficient (not gigantic) liquidity.
@@ -357,7 +362,9 @@ class DirectPublicProvider:
             },
             "data_quality":quality,
             "coverage":meta.get("coverage"),
-            "notice":notice,
+            "fast_live":bool(fast),
+            "enrichment_pending":bool(fast),
+            "notice":((notice + " ") if notice else "") + ("首页已先返回真实全A快照；连板历史、量比和深度K线按需计算。" if fast else ""),
             "trade_date":datetime.strptime(date,"%Y%m%d").strftime("%Y-%m-%d"),
             "updated_at":now.isoformat(timespec="seconds"),
             "market_status":_market_status(now),

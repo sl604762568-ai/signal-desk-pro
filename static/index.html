@@ -112,7 +112,7 @@
 <script>
 const STAGES=['冰点','修复','升温','主升','高潮','强高潮','分歧','退潮','过热'];
 let demoMode=false, dashboard=null, charts={}, analysisData=null, analysisTf='daily';
-console.info('Signal Desk Pro frontend v6.8-sector-rotation');
+console.info('Signal Desk Pro frontend v6.8.1-stable-live');
 const $=id=>document.getElementById(id);
 const num=(v,d=0)=>Number.isFinite(Number(v))?Number(v):d;
 const fmtPct=v=>`${num(v)>=0?'+':''}${num(v).toFixed(2)}%`;
@@ -157,7 +157,22 @@ async function loadSectorReview(force=false){let b=$('sectorBtn');if(b){b.disabl
 async function openSector(code,name=''){let box=$('sectorMembers');box.classList.add('show');$('sectorMemberTitle').textContent=`${name||code} · 成分股`;$('sectorMemberBody').innerHTML='<tr><td colspan="9" class="label">正在读取真实板块成分关系…</td></tr>';box.scrollIntoView({behavior:'smooth',block:'start'});try{let r=await fetch(`/api/sector/${encodeURIComponent(code)}?limit=300`,{cache:'no-store'});let d=await r.json();let a=d.members||[];$('sectorMemberNote').textContent=`${d.note||'按当日涨幅降序'} · 共 ${a.length} 只`;$('sectorMemberBody').innerHTML=a.length?a.map((x,i)=>`<tr onclick="analyzeStock('${esc(x.code)}','${esc(x.name)}')"><td>${i+1}</td><td><b>${esc(x.name)}</b><div class="subtle">${esc(x.code)}</div></td><td>¥${num(x.price).toFixed(2)}</td><td class="${num(x.pct)>=0?'red':'green'}">${fmtPct(x.pct)}</td><td>${num(x.turnover_rate).toFixed(1)}%</td><td>${num(x.volume_ratio).toFixed(2)}×</td><td>${money(x.amount)}</td><td class="${num(x.main_net)>=0?'red':'green'}">${money(x.main_net)}</td><td><span class="badge">${esc(x.relation_source||'板块成分')}</span></td></tr>`).join(''):'<tr><td colspan="9" class="label">暂无成分股数据</td></tr>'}catch(e){$('sectorMemberBody').innerHTML='<tr><td colspan="9" class="label">板块成分股接口暂不可用</td></tr>'}}
 
 function renderNews(d){let n=d.news||{},items=n.items||[];$('newsInfo').textContent=`${items.length} 条去重线索 · ${n.elapsed_ms||0}ms`;$('newsList').innerHTML=items.length?items.slice(0,28).map(x=>`<div class="news"><div class="src">${esc(x.source)}<br>#${x.rank}</div><div>${x.url?`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a>`:`<a>${esc(x.title)}</a>`}<div style="margin-top:4px">${(x.topics||[]).map(t=>`<span class="badge">${esc(t)}</span>`).join('')}</div></div><div class="sent ${x.sentiment==='positive'?'red':x.sentiment==='negative'?'green':''}">${x.sentiment==='positive'?'偏正':x.sentiment==='negative'?'偏负':'中性'}<br>${num(x.heat).toFixed(0)}</div></div>`).join(''):'<div class="label">新闻源暂无数据。</div>';let counts=Object.entries(n.source_counts||{}).map(([k,v])=>`${esc(k)}：${v}条`).join('<br>');let errors=(n.errors||[]).map(e=>`⚠ ${esc(e)}`).join('<br>');$('sourceHealth').innerHTML=(counts||'暂无源统计')+(errors?'<br><br>'+errors:'');let r=d.review||{};$('review').innerHTML=`<b>${esc(r.headline||'')}</b><br>${esc(r.money||'')}<br>${esc(r.relay||'')}<br>${esc(r.focus||'')}`}
-function renderAll(d){dashboard=d;renderMarket(d);renderHotspot(d);renderCandidates(d);renderNews(d);let q=d.data_quality==='partial'?'部分真实数据':(d.is_live?'实时行情':'回退/演示');$('livePill').innerHTML=`<span class="dot" style="background:${d.is_live?'#2bd78d':'#ffbd4a'}"></span>${q}`;let ss=d.source_status?.sina_snapshot;if(ss){$('livePill').title=`新浪快照 ${ss.rows||0}/${ss.expected||'?'} · 覆盖率 ${Math.round((ss.coverage||0)*100)}% · ${ss.elapsed_ms||0}ms`+(d.notice?' · '+d.notice:'')} $('marketSource').textContent=(d.source||'')+` · ${q}`;$('timePill').textContent=(d.updated_at||'').replace('T',' ').slice(0,19)}
+function renderAll(d){
+  dashboard=d;
+  renderMarket(d);
+  renderHotspot(d);
+  renderCandidates(d);
+  renderNews(d);
+  const q=d.data_quality==='partial'?'部分真实数据':(d.is_live?'实时行情':'回退/演示');
+  $('livePill').innerHTML=`<span class="dot" style="background:${d.is_live?'#2bd78d':'#ffbd4a'}"></span>${q}`;
+  const ss=d.source_status?.sina_snapshot;
+  if(ss){
+    $('livePill').title=`新浪快照 ${ss.rows||0}/${ss.expected||'?'} · 覆盖率 ${Math.round((ss.coverage||0)*100)}% · ${ss.elapsed_ms||0}ms`+(d.notice?' · '+d.notice:'');
+  }
+  $('marketSource').textContent=(d.source||'')+` · ${q}`;
+  $('timePill').textContent=(d.updated_at||'').replace('T',' ').slice(0,19);
+}
+
 async function loadDashboard(fresh=false){
   $('livePill').innerHTML='<span class="dot" style="background:#ffbd4a"></span>更新中';
   // 公网版先在数秒内展示演示骨架，避免某一路实时源异常时整页一直空白。

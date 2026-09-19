@@ -33,7 +33,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.8-sector-rotation")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.8.1-stable-live")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -119,7 +119,7 @@ def load_sector_rotation(days: int = 8) -> Dict[str, Any]:
     return {"timeline":timeline,"path":" → ".join(x["leader"]["name"] for x in timeline),"source":"本网站每日收盘板块快照","note":"随着网站每日收盘运行，流转路径会逐日积累并优先使用真实收盘快照。"}
 
 
-def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
+def build_dashboard(force_demo: bool=False, fast_live: bool=False) -> Dict[str, Any]:
     provider=get_provider(force_demo=force_demo)
     market_error=None
 
@@ -131,7 +131,7 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
         # Three independent networks run in parallel; news/hotspot can never delay market serially.
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=3) as ex:
-            fm=ex.submit(provider.fetch)
+            fm=ex.submit(provider.fetch, fast=fast_live)
             fn=ex.submit(build_news_radar)
             fh=ex.submit(fetch_hotspot_desk)
             try:
@@ -158,7 +158,7 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
     save_snapshot(market)
     market["history"]=load_history(20)
 
-    history_fetcher=getattr(provider,"history_fetcher",None) if market.get("is_live") else None
+    history_fetcher=(None if fast_live else getattr(provider,"history_fetcher",None)) if market.get("is_live") else None
     candidates=build_candidates(market,news,hotspot,history_fetcher=history_fetcher,limit=12)
 
     payload={**market,"news":news,"hotspot":hotspot,"candidates":candidates,"model":{
@@ -172,7 +172,7 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
 def _live_worker(out_q) -> None:
     """子进程内执行可能阻塞的所有真实数据抓取。"""
     try:
-        data = build_dashboard(force_demo=False)
+        data = build_dashboard(force_demo=False, fast_live=True)
         out_q.put({"ok": True, "data": data})
     except BaseException as exc:
         out_q.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -477,7 +477,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.8-sector-rotation",
+        "version": "6.8.1-stable-live",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
