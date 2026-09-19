@@ -57,12 +57,12 @@ def _vp(s):
     if prev>0 and op>0 and (op/prev-1)*100>5: risk.append("高开幅度较大")
     return clamp(score),sig[:4],risk[:4]
 
-def _hist(ak,code):
-    end=datetime.now().strftime("%Y%m%d"); start=(datetime.now()-timedelta(days=90)).strftime("%Y%m%d")
+def _hist(history_fetcher, code):
     try:
-        df=ak.stock_zh_a_hist(symbol=code,period="daily",start_date=start,end_date=end,adjust="qfq")
-        if df is None or len(df)<20:return {}
-        c=pd.to_numeric(df["收盘"],errors="coerce"); v=pd.to_numeric(df["成交量"],errors="coerce"); h=pd.to_numeric(df["最高"],errors="coerce")
+        df, _source = history_fetcher(code, 90)
+        if df is None or len(df) < 20:
+            return {}
+        c=pd.to_numeric(df["close"],errors="coerce"); v=pd.to_numeric(df["volume"],errors="coerce"); h=pd.to_numeric(df["high"],errors="coerce")
         last=float(c.iloc[-1]); ma5=float(c.tail(5).mean()); ma10=float(c.tail(10).mean()); ma20=float(c.tail(20).mean()); vol5=float(v.tail(5).mean())
         ret5=(last/float(c.iloc[-6])-1)*100 if len(c)>=6 and c.iloc[-6] else 0; bias5=(last/ma5-1)*100 if ma5 else 0
         trend=sum([last>ma5,ma5>ma10,ma10>ma20]); high20=float(h.tail(20).max())
@@ -77,7 +77,7 @@ def _bucket(item,board):
     if n(item.get("volume_ratio"))>=1.8 and n(item.get("pct"))>=3:return "放量异动"
     return "强势跟踪"
 
-def build_candidates(market:Dict[str,Any],news:Dict[str,Any],hotspot:Dict[str,Any],ak=None,limit:int=15):
+def build_candidates(market:Dict[str,Any],news:Dict[str,Any],hotspot:Dict[str,Any],history_fetcher=None,limit:int=15):
     stocks=market.get("active_stocks") or []
     if not stocks:return []
     hotspot_codes={str(x.get("code","")).zfill(6) for x in hotspot.get("candidates",[]) if x.get("code")}
@@ -95,9 +95,9 @@ def build_candidates(market:Dict[str,Any],news:Dict[str,Any],hotspot:Dict[str,An
         env=clamp(market_score*(1.02 if n(s.get("pct"))>0 else .88)); total=vp*.40+ns*.25+env*.20+strength*.15-(5 if ns<20 else 0)
         arr.append({**s,"code":code,"volume_price_score":round(vp,1),"news_score":round(ns,1),"market_score":round(env,1),"strength_score":round(strength,1),"score":round(clamp(total),1),"signals":sig+nh,"risks":list(dict.fromkeys(risk)),"stage":stage})
     arr.sort(key=lambda x:(x["score"],n(x.get("amount"))),reverse=True); top=arr[:max(limit,20)]
-    if ak is not None:
+    if history_fetcher is not None:
         for item in top[:12]:
-            item["history"]=_hist(ak,item["code"])
+            item["history"]=_hist(history_fetcher,item["code"])
             h=item["history"]
             if h:
                 bonus=0

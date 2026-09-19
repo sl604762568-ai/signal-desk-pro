@@ -9,10 +9,18 @@ services:
     envVars:
       - key: CACHE_SECONDS
         value: "75"
+      - key: LIVE_REFRESH_TIMEOUT
+        value: "45"
+      - key: LIVE_RETRY_COOLDOWN
+        value: "30"
+      - key: PUBLIC_SOURCE_TIMEOUT
+        value: "4.5"
+      - key: SINA_WORKERS
+        value: "10"
       - key: NEWSNOW_BASE_URL
         value: https://newsnow.busiyi.world
       - key: NEWS_TIMEOUT
-        value: "6"
+        value: "5"
       - key: HOTSPOT_DESK_URL
         value: https://hotspot-link-desk.sl604762568.chatgpt.site
       - key: DB_PATH

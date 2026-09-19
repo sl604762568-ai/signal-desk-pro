@@ -28,16 +28,20 @@ def score_sentiment(metrics: Dict[str, Any]) -> Dict[str, Any]:
     zt = float(metrics.get("zt_count", 0) or 0)
     dt = float(metrics.get("dt_count", 0) or 0)
     seal = float(metrics.get("seal_rate", 0) or 0)
-    premium = float(metrics.get("yesterday_premium", 0) or 0)
+    premium_raw = metrics.get("yesterday_premium")
+    premium = float(premium_raw) if premium_raw is not None else 0.0
     max_board = float(metrics.get("max_board", 0) or 0)
-    up = float(metrics.get("up_count", 0) or 0)
-    down = float(metrics.get("down_count", 0) or 0)
+    up_raw = metrics.get("up_count")
+    down_raw = metrics.get("down_count")
+    breadth_known = up_raw is not None and down_raw is not None
+    up = float(up_raw or 0)
+    down = float(down_raw or 0)
     promotions = metrics.get("promotion_rates", []) or []
 
     limit_score = clamp(zt / 85 * 100)
     seal_score = clamp(seal)
-    premium_score = clamp((premium + 5) / 10 * 100)
-    breadth_score = clamp(up / max(1.0, up + down) * 100)
+    premium_score = clamp((premium + 5) / 10 * 100) if premium_raw is not None else 50.0
+    breadth_score = clamp(up / max(1.0, up + down) * 100) if breadth_known else 50.0
     high_score = clamp(max_board / 8 * 100)
     safety_score = 100 - clamp(dt / 35 * 100)
 
@@ -87,7 +91,8 @@ def build_alerts(metrics: Dict[str, Any], score_info: Dict[str, Any]) -> List[Di
     alerts: List[Dict[str, str]] = []
     seal = float(metrics.get("seal_rate", 0) or 0)
     dt = int(metrics.get("dt_count", 0) or 0)
-    premium = float(metrics.get("yesterday_premium", 0) or 0)
+    premium_raw = metrics.get("yesterday_premium")
+    premium = float(premium_raw) if premium_raw is not None else 0.0
     max_board = int(metrics.get("max_board", 0) or 0)
     auction_gap = metrics.get("auction", {}).get("avg_gap")
 
@@ -97,9 +102,9 @@ def build_alerts(metrics: Dict[str, Any], score_info: Dict[str, Any]) -> List[Di
         alerts.append({"level": "good", "title": "封板质量较强", "text": f"当前封板率 {seal:.1f}%，封板稳定性较好。"})
     if dt >= 20:
         alerts.append({"level": "danger", "title": "亏钱效应扩散", "text": f"跌停 {dt} 家，注意高位负反馈。"})
-    if premium <= -2:
+    if premium_raw is not None and premium <= -2:
         alerts.append({"level": "warn", "title": "昨日涨停反馈偏弱", "text": f"昨日涨停平均反馈 {premium:.2f}%。"})
-    elif premium >= 2:
+    elif premium_raw is not None and premium >= 2:
         alerts.append({"level": "good", "title": "昨日涨停有溢价", "text": f"昨日涨停平均反馈 +{premium:.2f}%。"})
     if max_board >= 6:
         alerts.append({"level": "good", "title": "市场高度打开", "text": f"当前最高 {max_board} 板，空间标高度较高。"})
@@ -119,14 +124,14 @@ def build_review(metrics: Dict[str, Any], score_info: Dict[str, Any]) -> Dict[st
     zt = metrics.get("zt_count", 0)
     dt = metrics.get("dt_count", 0)
     seal = metrics.get("seal_rate", 0)
-    premium = metrics.get("yesterday_premium", 0)
+    premium = metrics.get("yesterday_premium")
     max_board = metrics.get("max_board", 0)
     promo = metrics.get("promotion_rates", [])
     best_promo = max((p.get("rate", 0) for p in promo if p.get("denominator", 0)), default=0)
 
-    if premium >= 1.5 and seal >= 70:
+    if premium is not None and premium >= 1.5 and seal >= 70:
         money = "昨日涨停有正溢价，封板质量也较好，赚钱效应偏正。"
-    elif premium < 0 or seal < 60:
+    elif (premium is not None and premium < 0) or seal < 60:
         money = "昨日涨停反馈或封板质量偏弱，短线亏钱效应需要防范。"
     else:
         money = "赚钱效应处于中性区，强弱分化仍然明显。"

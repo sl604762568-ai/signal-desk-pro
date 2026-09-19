@@ -30,7 +30,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.3-nonblocking")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.4-direct-public")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -38,7 +38,7 @@ _lock = threading.Lock()
 
 # 真实行情不再占用 HTTP 请求线程。后台独立进程最多运行 LIVE_REFRESH_TIMEOUT 秒；
 # 即使第三方 SDK 永久卡住，也能被主进程终止。
-LIVE_REFRESH_TIMEOUT = int(os.getenv("LIVE_REFRESH_TIMEOUT", "18"))
+LIVE_REFRESH_TIMEOUT = int(os.getenv("LIVE_REFRESH_TIMEOUT", "45"))
 LIVE_RETRY_COOLDOWN = int(os.getenv("LIVE_RETRY_COOLDOWN", "30"))
 _live_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 _refresh: Dict[str, Any] = {
@@ -89,12 +89,34 @@ def load_history(limit: int = 20) -> List[Dict[str, Any]]:
 def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
     provider=get_provider(force_demo=force_demo)
     market_error=None
-    try:
+
+    if force_demo:
         market=provider.fetch()
-    except Exception as exc:
-        market_error=f"实时行情失败：{type(exc).__name__}: {exc}"
-        provider=get_provider(force_demo=True)
-        market=provider.fetch(); market["source"]="行情演示回退"; market["is_live"]=False
+        news=demo_news_radar()
+        hotspot={"url":os.getenv("HOTSPOT_DESK_URL","https://hotspot-link-desk.sl604762568.chatgpt.site"),"signals":[],"candidates":[],"error":"演示模式未抓取外部热点链路"}
+    else:
+        # Three independent networks run in parallel; news/hotspot can never delay market serially.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            fm=ex.submit(provider.fetch)
+            fn=ex.submit(build_news_radar)
+            fh=ex.submit(fetch_hotspot_desk)
+            try:
+                market=fm.result()
+            except Exception as exc:
+                market_error=f"实时行情失败：{type(exc).__name__}: {exc}"
+                market=get_provider(force_demo=True).fetch(); market["source"]="行情演示回退"; market["is_live"]=False
+            try:
+                news=fn.result()
+            except Exception:
+                news=demo_news_radar(); news["errors"]=(news.get("errors") or [])+["实时新闻抓取失败"]
+            try:
+                hotspot=fh.result()
+            except Exception as exc:
+                hotspot={"url":os.getenv("HOTSPOT_DESK_URL","https://hotspot-link-desk.sl604762568.chatgpt.site"),"signals":[],"candidates":[],"error":f"{type(exc).__name__}: {exc}"}
+        if not news.get("items"):
+            fallback=demo_news_radar(); fallback["errors"]=(news.get("errors") or [])+["所有实时新闻源暂无可用数据，已显示演示新闻结构"]
+            news=fallback
 
     market["sentiment"]=score_sentiment(market)
     market["alerts"]=build_alerts(market,market["sentiment"])
@@ -103,21 +125,12 @@ def build_dashboard(force_demo: bool=False) -> Dict[str, Any]:
     save_snapshot(market)
     market["history"]=load_history(20)
 
-    if force_demo:
-        news=demo_news_radar()
-    else:
-        news=build_news_radar()
-        if not news.get("items"):
-            fallback=demo_news_radar(); fallback["errors"]=(news.get("errors") or [])+["所有实时新闻源暂无可用数据，已显示演示结构"]
-            news=fallback
-
-    hotspot=fetch_hotspot_desk() if not force_demo else {"url":os.getenv("HOTSPOT_DESK_URL","https://hotspot-link-desk.sl604762568.chatgpt.site"),"signals":[],"candidates":[],"error":"演示模式未抓取外部热点链路"}
-    ak=getattr(provider,"ak",None) if market.get("is_live") else None
-    candidates=build_candidates(market,news,hotspot,ak=ak,limit=12)
+    history_fetcher=getattr(provider,"history_fetcher",None) if market.get("is_live") else None
+    candidates=build_candidates(market,news,hotspot,history_fetcher=history_fetcher,limit=12)
 
     payload={**market,"news":news,"hotspot":hotspot,"candidates":candidates,"model":{
-        "name":"热点×情绪×量价个股研究模型 v6.2","weights":{"量价":40,"热点新闻":25,"市场情绪":20,"强势结构":15},
-        "note":"评分代表研究优先度，不预测涨跌，不构成交易指令。"
+        "name":"热点×情绪×量价个股研究模型 v6.4","weights":{"量价":40,"热点新闻":25,"市场情绪":20,"强势结构":15},
+        "note":"评分代表研究优先度，不预测涨跌；真实源不足时会明确标记，不用演示股票冒充真实候选。"
     }}
     return payload
 
@@ -265,13 +278,16 @@ def dashboard(mode: str=Query("auto",pattern="^(auto|demo)$"), fresh: bool=False
 
 @app.get("/api/review-picks")
 def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
-    # 复用dashboard行情/新闻；扫描历史日线按按钮触发，避免首页每次加载都产生大量请求。
-    data=build_dashboard(force_demo=(mode=="demo"))
-    if not data.get("is_live"):
-        return JSONResponse({"regime": {"level":"--","score":0,"note":"实时行情不可用"}, "picks":[], "chan_picks":[], "scanned":0, "error":"真实行情源暂不可用，复盘选股不输出虚构个股。"})
+    if mode == "demo":
+        return JSONResponse({"regime": {"level":"--","score":0,"note":"演示模式不输出虚构复盘个股"}, "picks":[], "chan_picks":[], "scanned":0, "error":"请切换实时模式后执行复盘。"})
+    _harvest_refresh()
+    data=_live_cache.get("data")
+    if not data:
+        _start_refresh(force=False)
+        return JSONResponse({"regime": {"level":"--","score":0,"note":"真实行情正在后台刷新"}, "picks":[], "chan_picks":[], "scanned":0, "error":"真实行情尚未准备好，请等待数据源状态变为实时后再点一次。"})
     try:
-        import akshare as ak
-        result=build_review_picks(data, data.get("news") or {}, ak=ak, limit=limit)
+        from public_sources import fetch_history_df
+        result=build_review_picks(data, data.get("news") or {}, history_fetcher=fetch_history_df, limit=limit)
         result["trade_date"]=data.get("trade_date")
         result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
         return JSONResponse(result)
@@ -282,16 +298,22 @@ def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Que
 def stock_detail(code: str):
     code=''.join(ch for ch in code if ch.isdigit())[:6].zfill(6)
     try:
-        import akshare as ak
-        end=datetime.now(CN_TZ).strftime("%Y%m%d"); start=(datetime.now(CN_TZ)-timedelta(days=120)).strftime("%Y%m%d")
-        df=ak.stock_zh_a_hist(symbol=code,period="daily",start_date=start,end_date=end,adjust="qfq")
+        from public_sources import fetch_history_df
+        df, source=fetch_history_df(code, 90)
         if df is None or df.empty: return JSONResponse({"code":code,"rows":[],"error":"暂无K线"})
         rows=[]
         for _,r in df.tail(70).iterrows():
-            rows.append({"date":str(r.get("日期")),"open":float(r.get("开盘",0)),"close":float(r.get("收盘",0)),"high":float(r.get("最高",0)),"low":float(r.get("最低",0)),"volume":float(r.get("成交量",0)),"amount":float(r.get("成交额",0))})
-        return {"code":code,"rows":rows,"error":None}
+            rows.append({"date":str(r.get("date","")),"open":float(r.get("open",0)),"close":float(r.get("close",0)),"high":float(r.get("high",0)),"low":float(r.get("low",0)),"volume":float(r.get("volume",0)),"amount":float(r.get("amount",0) or 0)})
+        return {"code":code,"rows":rows,"source":source,"error":None}
     except Exception as exc:
         return JSONResponse({"code":code,"rows":[],"error":f"{type(exc).__name__}: {exc}"})
+
+@app.get("/api/sources")
+def sources_probe():
+    from public_sources import probe_sources
+    started=time.time()
+    probes=probe_sources()
+    return {"ok":any(x.get("ok") for x in probes.values()),"elapsed_ms":int((time.time()-started)*1000),"sources":probes}
 
 @app.get("/api/health")
 def health():
@@ -305,7 +327,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.3-nonblocking",
+        "version": "6.4-direct-public",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

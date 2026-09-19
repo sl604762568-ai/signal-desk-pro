@@ -23,8 +23,12 @@ def market_regime(market: Dict[str, Any]) -> Dict[str, Any]:
     """Use the dashboard's real-time breadth/sentiment to choose today's review style."""
     s = market.get("sentiment") or {}
     score = n(s.get("score"), 50)
-    up, down = n(market.get("up_count")), n(market.get("down_count"))
-    breadth = up / max(1, up + down)
+    up_raw, down_raw = market.get("up_count"), market.get("down_count")
+    if up_raw is None or down_raw is None:
+        breadth = 0.50
+    else:
+        up, down = n(up_raw), n(down_raw)
+        breadth = up / max(1, up + down)
     seal = n(market.get("seal_rate"), 60)
     premium = n(market.get("yesterday_premium"), 0)
     dt = n(market.get("dt_count"), 0)
@@ -57,25 +61,22 @@ def market_regime(market: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _hist_df(ak, code: str) -> pd.DataFrame:
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+def _hist_df(history_fetcher, code: str) -> pd.DataFrame:
     try:
-        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
+        df, _source = history_fetcher(code, 180)
         if df is None or len(df) < 65:
             return pd.DataFrame()
         out = pd.DataFrame({
-            "open": pd.to_numeric(df["开盘"], errors="coerce"),
-            "close": pd.to_numeric(df["收盘"], errors="coerce"),
-            "high": pd.to_numeric(df["最高"], errors="coerce"),
-            "low": pd.to_numeric(df["最低"], errors="coerce"),
-            "volume": pd.to_numeric(df["成交量"], errors="coerce"),
-            "amount": pd.to_numeric(df.get("成交额", 0), errors="coerce"),
+            "open": pd.to_numeric(df["open"], errors="coerce"),
+            "close": pd.to_numeric(df["close"], errors="coerce"),
+            "high": pd.to_numeric(df["high"], errors="coerce"),
+            "low": pd.to_numeric(df["low"], errors="coerce"),
+            "volume": pd.to_numeric(df["volume"], errors="coerce"),
+            "amount": pd.to_numeric(df.get("amount", 0), errors="coerce"),
         }).dropna(subset=["close", "high", "low", "volume"])
         return out
     except Exception:
         return pd.DataFrame()
-
 
 def _signals(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     if df.empty or len(df) < 65:
@@ -243,14 +244,14 @@ def _chan_signals(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return out
 
 
-def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], ak=None, limit: int = 10) -> Dict[str, Any]:
+def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], history_fetcher=None, limit: int = 10) -> Dict[str, Any]:
     regime = market_regime(market)
     universe = market.get("review_universe") or market.get("active_stocks") or []
-    if ak is None or not universe:
+    if history_fetcher is None or not universe:
         return {"regime": regime, "picks": [], "chan_picks": [], "scanned": 0, "error": "真实日线数据源不可用，无法执行全市场复盘选股。"}
 
     # Historical calls are expensive. First rank by liquidity/activity, then fetch a capped pool.
-    pool = sorted(universe, key=lambda x: (n(x.get("amount")), abs(n(x.get("pct")))), reverse=True)[:72]
+    pool = sorted(universe, key=lambda x: (n(x.get("amount")), abs(n(x.get("pct")))), reverse=True)[:48]
     picks: List[Dict[str, Any]] = []
     chan: List[Dict[str, Any]] = []
     scanned = 0
@@ -259,10 +260,10 @@ def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], ak=None, li
     def work(s):
         code=str(s.get("code","")).zfill(6)
         if len(code)!=6 or "ST" in str(s.get("name","")).upper(): return s, pd.DataFrame()
-        return s, _hist_df(ak, code)
+        return s, _hist_df(history_fetcher, code)
 
     rows=[]
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futs=[ex.submit(work,s) for s in pool]
         for f in as_completed(futs):
             try: rows.append(f.result())

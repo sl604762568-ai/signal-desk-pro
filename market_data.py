@@ -141,268 +141,212 @@ class DemoProvider:
         }
 
 
-class AKShareProvider:
-    name = "AKShare / 东方财富"
+
+class DirectPublicProvider:
+    """No-token provider: Sina all-A snapshot + Tencent/Sina daily history fallback.
+
+    This deliberately bypasses AKShare for the live core so a blocked upstream adapter cannot
+    prevent the dashboard from updating. Public web endpoints are best-effort and the payload
+    always carries source/coverage metadata.
+    """
+    name = "新浪实时快照 + 腾讯K线"
 
     def __init__(self):
-        import akshare as ak  # type: ignore
-        self.ak = ak
+        from public_sources import fetch_history_df
+        self.history_fetcher = fetch_history_df
 
     def _latest_trade_date(self) -> str:
         now = datetime.now(CN_TZ)
-        try:
-            cal = self.ak.tool_trade_date_hist_sina()
-            col = "trade_date" if "trade_date" in cal.columns else cal.columns[0]
-            dates = pd.to_datetime(cal[col]).dt.date
-            candidates = [d for d in dates if d <= now.date()]
-            if candidates:
-                return max(candidates).strftime("%Y%m%d")
-        except Exception:
-            pass
-        # 兜底：周末向前推，节假日由接口报错后上层回退。
-        d = now.date()
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
-        return d.strftime("%Y%m%d")
+        while now.weekday() >= 5:
+            now -= timedelta(days=1)
+        return now.strftime("%Y%m%d")
 
     def fetch(self) -> Dict[str, Any]:
-        ak = self.ak
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from public_sources import fetch_sina_all_a, fetch_history_df, limit_pct
+
         now = datetime.now(CN_TZ)
         date = self._latest_trade_date()
+        spot, meta = fetch_sina_all_a()
+        if spot is None or spot.empty or "code" not in spot.columns:
+            raise RuntimeError("新浪全A快照无可用数据")
 
-        errors: List[str] = []
-        def safe_df(label, fn):
-            try:
-                df = fn()
-                return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
-            except Exception as exc:
-                errors.append(f"{label}:{type(exc).__name__}")
-                return pd.DataFrame()
+        # Normalize fields from Sina's direct market-center endpoint.
+        rename = {
+            "code":"代码", "name":"名称", "trade":"最新价", "changepercent":"涨跌幅",
+            "settlement":"昨收", "open":"今开", "high":"最高", "low":"最低",
+            "volume":"成交量", "amount":"成交额", "turnoverratio":"换手率",
+        }
+        spot = spot.rename(columns={k:v for k,v in rename.items() if k in spot.columns}).copy()
+        spot["代码"] = spot["代码"].astype(str).str.zfill(6)
+        for col in ["最新价","涨跌幅","昨收","今开","最高","最低","成交量","成交额","换手率"]:
+            if col in spot.columns:
+                spot[col] = pd.to_numeric(spot[col], errors="coerce")
+            else:
+                spot[col] = 0.0
+        if "名称" not in spot.columns:
+            spot["名称"] = ""
 
-        # 单个源失败不再拖垮整个工作台。
-        zt = safe_df("涨停池", lambda: ak.stock_zt_pool_em(date=date))
-        zbgc = safe_df("炸板池", lambda: ak.stock_zt_pool_zbgc_em(date=date))
-        dtgc = safe_df("跌停池", lambda: ak.stock_zt_pool_dtgc_em(date=date))
-        prev = safe_df("昨日涨停", lambda: ak.stock_zt_pool_previous_em(date=date))
-        concept = safe_df("概念板块", lambda: ak.stock_board_concept_name_em())
-
-        spot_source = "东方财富"
-        spot = safe_df("全A东财", lambda: ak.stock_zh_a_spot_em())
-        # 东财在部分云机房可能超时，改用新浪全A做第二路回退。新浪字段已经被 AKShare 标准化。
-        if spot.empty or "代码" not in spot.columns or "涨跌幅" not in spot.columns:
-            spot_source = "新浪"
-            spot = safe_df("全A新浪", lambda: ak.stock_zh_a_spot())
-        if spot.empty:
-            raise RuntimeError("全A实时行情两路均不可用：" + ",".join(errors[-4:]))
-
-        zt_count = int(len(zt))
-        zb_count = int(len(zbgc))
-        dt_count = int(len(dtgc))
-        seal_rate = round(zt_count / max(1, zt_count + zb_count) * 100, 1)
-        yesterday_premium = round(_safe_mean(prev.get("涨跌幅", [])), 2)
-        if not prev.empty and "昨日连板数" in prev.columns:
-            lprev = prev[pd.to_numeric(prev["昨日连板数"], errors="coerce").fillna(0) >= 2]
-            yesterday_lianban_premium = round(_safe_mean(lprev.get("涨跌幅", [])), 2)
+        full_market = bool(meta.get("full_market"))
+        pct = pd.to_numeric(spot["涨跌幅"], errors="coerce")
+        if full_market:
+            up_count = int((pct > 0).sum()); down_count = int((pct < 0).sum()); flat_count = int((pct == 0).sum())
         else:
-            yesterday_lianban_premium = 0.0
+            up_count = down_count = flat_count = None
+        turnover = float(pd.to_numeric(spot["成交额"], errors="coerce").fillna(0).sum()) if full_market else 0.0
 
-        pct = pd.to_numeric(spot.get("涨跌幅"), errors="coerce")
-        up_count = int((pct > 0).sum())
-        down_count = int((pct < 0).sum())
-        flat_count = int((pct == 0).sum())
-        turnover = float(pd.to_numeric(spot.get("成交额"), errors="coerce").fillna(0).sum())
+        # Mechanical daily price-limit reconstruction from current snapshot.
+        zt_rows=[]; dt_rows=[]; zb_rows=[]
+        for _, r in spot.iterrows():
+            code=str(r.get("代码","")).zfill(6); name=str(r.get("名称", ""))
+            p=_num(r.get("涨跌幅")); prev=_num(r.get("昨收")); high=_num(r.get("最高")); lp=limit_pct(code,name)
+            high_pct=(high/prev-1)*100 if prev>0 and high>0 else -999
+            if p >= lp - 0.35:
+                zt_rows.append(r)
+            if p <= -lp + 0.35:
+                dt_rows.append(r)
+            if high_pct >= lp - 0.30 and p < lp - 0.60:
+                zb_rows.append(r)
+        zt=pd.DataFrame(zt_rows); dtgc=pd.DataFrame(dt_rows); zbgc=pd.DataFrame(zb_rows)
+        zt_count=len(zt); dt_count=len(dtgc); zb_count=len(zbgc)
+        seal_rate=round(zt_count/max(1,zt_count+zb_count)*100,1)
 
-        board_ser = pd.to_numeric(zt.get("连板数"), errors="coerce").fillna(1).astype(int) if not zt.empty else pd.Series(dtype=int)
-        max_board = int(board_ser.max()) if not board_ser.empty else 0
-
-        # 连板梯队
-        ladder: List[Dict[str, Any]] = []
-        if not zt.empty and "连板数" in zt.columns:
-            zt2 = zt.copy()
-            zt2["_board"] = pd.to_numeric(zt2["连板数"], errors="coerce").fillna(1).astype(int)
-            for b in sorted([x for x in zt2["_board"].unique().tolist() if x >= 2], reverse=True):
-                rows = zt2[zt2["_board"] == b]
-                ladder.append({"board": int(b), "count": int(len(rows)), "stocks": rows["名称"].astype(str).head(5).tolist()})
-
-        # 晋级率：昨日 N 板作为分母，今日 N+1 板作为分子。
-        promotions: List[Dict[str, Any]] = []
-        prev_board = pd.to_numeric(prev.get("昨日连板数"), errors="coerce").fillna(0).astype(int) if not prev.empty and "昨日连板数" in prev.columns else pd.Series(dtype=int)
-        today_board = board_ser
-        for n in range(1, max(5, max_board)):
-            denominator = int((prev_board == n).sum())
-            numerator = int((today_board == n + 1).sum())
-            rate = round(numerator / denominator * 100, 1) if denominator else 0.0
-            promotions.append({"label": f"{n}→{n+1}", "numerator": numerator, "denominator": denominator, "rate": rate})
-
-        # 涨停股按“所属行业”聚合，作为题材/行业线索。
-        themes: List[Dict[str, Any]] = []
-        if not zt.empty and "所属行业" in zt.columns:
-            tmp = zt.copy()
-            tmp["_board"] = pd.to_numeric(tmp.get("连板数"), errors="coerce").fillna(1).astype(int)
-            grouped = []
-            for name, rows in tmp.groupby("所属行业"):
-                if not name or str(name) == "nan":
-                    continue
-                cnt = len(rows)
-                mb = int(rows["_board"].max())
-                score = min(100, round(cnt * 9 + max(0, mb - 1) * 10, 1))
-                leaders = rows.sort_values(["_board", "涨跌幅"], ascending=[False, False])["名称"].astype(str).head(3).tolist()
-                grouped.append({"name": str(name), "limitups": int(cnt), "max_board": mb, "score": score, "leaders": leaders})
-            themes = sorted(grouped, key=lambda x: (x["score"], x["limitups"]), reverse=True)[:10]
-
-        # 概念实时排行：不逐个拉成份股，避免接口过载。
-        concepts: List[Dict[str, Any]] = []
-        if not concept.empty:
-            c = concept.copy()
-            c["_pct"] = pd.to_numeric(c.get("涨跌幅"), errors="coerce").fillna(-999)
-            c = c.sort_values("_pct", ascending=False).head(10)
-            for _, r in c.iterrows():
-                concepts.append({
-                    "name": str(r.get("板块名称", "")),
-                    "pct": round(_num(r.get("涨跌幅")), 2),
-                    "up": int(_num(r.get("上涨家数"))),
-                    "down": int(_num(r.get("下跌家数"))),
-                    "leader": str(r.get("领涨股票", "")),
-                    "leader_pct": round(_num(r.get("领涨股票-涨跌幅")), 2),
-                })
-
-        # 昨日涨停竞价：用全A实时表的今开/昨收合并计算。
-        auction = {"avg_gap": None, "red_ratio": None, "strong_ratio": None, "leaders": []}
-        if not prev.empty and not spot.empty and "代码" in prev.columns and "代码" in spot.columns:
-            p = prev[["代码", "名称"]].drop_duplicates().copy()
-            s = spot[["代码", "今开", "昨收"]].copy()
-            p["代码"] = p["代码"].astype(str).str.zfill(6)
-            s["代码"] = s["代码"].astype(str).str.zfill(6)
-            m = p.merge(s, on="代码", how="left")
-            m["今开"] = pd.to_numeric(m["今开"], errors="coerce")
-            m["昨收"] = pd.to_numeric(m["昨收"], errors="coerce")
-            m = m[(m["今开"] > 0) & (m["昨收"] > 0)].copy()
-            if not m.empty:
-                m["gap"] = (m["今开"] / m["昨收"] - 1) * 100
-                auction = {
-                    "avg_gap": round(float(m["gap"].mean()), 2),
-                    "red_ratio": round(float((m["gap"] > 0).mean() * 100), 1),
-                    "strong_ratio": round(float((m["gap"] >= 3).mean() * 100), 1),
-                    "leaders": [
-                        {"code": str(r["代码"]), "name": str(r["名称"]), "gap": round(float(r["gap"]), 2)}
-                        for _, r in m.sort_values("gap", ascending=False).head(8).iterrows()
-                    ],
-                }
-
-        # 活跃候选池：实时全A中筛选有成交、非ST、强势且具流动性的股票。
-        active_stocks: List[Dict[str, Any]] = []
-        if not spot.empty and "代码" in spot.columns:
-            sp = spot.copy()
-            for col in ["涨跌幅","量比","换手率","成交额","最新价","最高","最低","今开","昨收"]:
-                if col in sp.columns:
-                    sp[col] = pd.to_numeric(sp[col], errors="coerce")
-            if "名称" in sp.columns:
-                sp = sp[~sp["名称"].astype(str).str.upper().str.contains("ST", na=False)]
-            if "成交额" in sp.columns and "涨跌幅" in sp.columns:
-                sp = sp[(sp["成交额"].fillna(0) >= 8e7) & (sp["涨跌幅"].fillna(-99) >= 1.0) & (sp["涨跌幅"].fillna(99) <= 10.5)]
-                vr = sp["量比"].fillna(0) if "量比" in sp.columns else 0
-                tr = sp["换手率"].fillna(0) if "换手率" in sp.columns else 0
-                sp["_rank"] = sp["涨跌幅"].fillna(0)*2.2 + pd.Series(vr, index=sp.index).clip(0,5)*2 + pd.Series(tr,index=sp.index).clip(0,20)*0.35 + (sp["成交额"].fillna(0)/1e9).clip(0,10)
-                sp = sp.sort_values("_rank", ascending=False).head(60)
-            # 行业先用涨停池补齐；普通活跃股允许为空。
-            ind_map = {}
-            if not zt.empty and "代码" in zt.columns and "所属行业" in zt.columns:
-                ind_map = {str(r.get("代码","")).zfill(6): str(r.get("所属行业", "")) for _, r in zt.iterrows()}
-            for _, r in sp.iterrows():
-                code = str(r.get("代码", "")).zfill(6)
-                active_stocks.append({
-                    "code": code, "name": str(r.get("名称", "")), "price": round(_num(r.get("最新价")), 3),
-                    "pct": round(_num(r.get("涨跌幅")), 2), "volume_ratio": round(_num(r.get("量比")), 2),
-                    "turnover_rate": round(_num(r.get("换手率")), 2), "amount": _num(r.get("成交额")),
-                    "high": _num(r.get("最高")), "low": _num(r.get("最低")), "open": _num(r.get("今开")),
-                    "prev_close": _num(r.get("昨收")), "industry": ind_map.get(code, ""),
-                })
-
-        # 复盘选股使用更宽的流动性股票池：不要求当日上涨，避免漏掉缩量回踩/缠论二买。
-        review_universe: List[Dict[str, Any]] = []
-        if not spot.empty and "代码" in spot.columns:
-            rv = spot.copy()
-            for col in ["涨跌幅","量比","换手率","成交额","最新价","最高","最低","今开","昨收"]:
-                if col in rv.columns:
-                    rv[col] = pd.to_numeric(rv[col], errors="coerce")
-            if "名称" in rv.columns:
-                rv = rv[~rv["名称"].astype(str).str.upper().str.contains("ST", na=False)]
-            if "成交额" in rv.columns and "涨跌幅" in rv.columns:
-                rv = rv[(rv["成交额"].fillna(0) >= 1.2e8) & (rv["涨跌幅"].fillna(-99) >= -6.0) & (rv["涨跌幅"].fillna(99) <= 10.5)]
-                # 先按流动性+活跃度压缩到可承受的历史K请求规模。
-                rv["_rr"] = (rv["成交额"].fillna(0)/1e9).clip(0,20) * 1.8 + rv["涨跌幅"].abs().fillna(0) * .35
-                rv = rv.sort_values("_rr", ascending=False).head(180)
-            ind_map2 = {}
-            if not zt.empty and "代码" in zt.columns and "所属行业" in zt.columns:
-                ind_map2 = {str(r.get("代码","")).zfill(6): str(r.get("所属行业", "")) for _, r in zt.iterrows()}
-            for _, r in rv.iterrows():
-                code = str(r.get("代码", "")).zfill(6)
-                review_universe.append({
-                    "code": code, "name": str(r.get("名称", "")), "price": round(_num(r.get("最新价")), 3),
-                    "pct": round(_num(r.get("涨跌幅")), 2), "volume_ratio": round(_num(r.get("量比")), 2),
-                    "turnover_rate": round(_num(r.get("换手率")), 2), "amount": _num(r.get("成交额")),
-                    "high": _num(r.get("最高")), "low": _num(r.get("最低")), "open": _num(r.get("今开")),
-                    "prev_close": _num(r.get("昨收")), "industry": ind_map2.get(code, ""),
-                })
-
-        limitup_stocks: List[Dict[str, Any]] = []
+        # Consecutive-limit estimate for today's limit-up names, using direct Tencent/Sina K-lines.
+        board_map: Dict[str,int] = {}
+        board_errors=[]
+        def board_work(row):
+            code=str(row.get("代码","")).zfill(6); name=str(row.get("名称", "")); lp=limit_pct(code,name)
+            try:
+                hist, _src = fetch_history_df(code, 14)
+                if hist.empty: return code,1
+                h=hist.copy(); h["close"]=pd.to_numeric(h["close"],errors="coerce")
+                closes=h["close"].dropna().tolist(); dates=h.get("date",pd.Series(dtype=str)).astype(str).tolist()
+                consec=0
+                # If provider does not yet include today's bar, current snapshot is board 1.
+                includes_today=bool(dates and dates[-1][:10].replace('/','-') == now.strftime('%Y-%m-%d'))
+                if not includes_today: consec=1
+                for i in range(len(closes)-1,0,-1):
+                    ret=(closes[i]/closes[i-1]-1)*100 if closes[i-1] else 0
+                    if ret >= lp-0.45: consec += 1
+                    else: break
+                return code,max(1,consec)
+            except Exception as exc:
+                return code,1
         if not zt.empty:
-            for _, r in zt.head(100).iterrows():
+            rows=zt.to_dict("records")[:36]
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                futs=[ex.submit(board_work,r) for r in rows]
+                for fut in as_completed(futs):
+                    try:
+                        c,b=fut.result(); board_map[c]=b
+                    except Exception as exc:
+                        board_errors.append(type(exc).__name__)
+        max_board=max(board_map.values(), default=(1 if zt_count else 0))
+
+        ladder=[]
+        if board_map:
+            by=defaultdict(list)
+            name_map={str(r.get("代码","")).zfill(6):str(r.get("名称","")) for _,r in zt.iterrows()}
+            for c,b in board_map.items():
+                if b>=2: by[b].append(name_map.get(c,c))
+            for b in sorted(by, reverse=True):
+                ladder.append({"board":int(b),"count":len(by[b]),"stocks":by[b][:5]})
+
+        limitup_stocks=[]
+        if not zt.empty:
+            for _,r in zt.head(120).iterrows():
+                code=str(r.get("代码","")).zfill(6)
                 limitup_stocks.append({
-                    "code": str(r.get("代码", "")).zfill(6), "name": str(r.get("名称", "")),
-                    "pct": round(_num(r.get("涨跌幅")),2), "industry": str(r.get("所属行业", "")),
-                    "board": int(_num(r.get("连板数"),1)), "seal_amount": _num(r.get("封板资金")),
-                    "first_seal": str(r.get("首次封板时间", "")), "last_seal": str(r.get("最后封板时间", "")),
-                    "break_count": int(_num(r.get("炸板次数"))),
+                    "code":code,"name":str(r.get("名称","")),"pct":round(_num(r.get("涨跌幅")),2),
+                    "industry":"","board":int(board_map.get(code,1)),"seal_amount":0.0,
+                    "first_seal":"","last_seal":"","break_count":0,
                 })
 
-        # 把涨停股并入活跃池，避免一字/低换手龙头被预筛遗漏。
-        seen_codes = {x["code"] for x in active_stocks}
-        spot_map = {str(r.get("代码","")).zfill(6): r for _, r in spot.iterrows()} if not spot.empty and "代码" in spot.columns else {}
+        # Candidate universe from the real snapshot. We do not invent industries when the source lacks them.
+        base=spot.copy()
+        base=base[~base["名称"].astype(str).str.upper().str.contains("ST|退",regex=True,na=False)]
+        base=base[(base["成交额"].fillna(0)>=8e7) & (base["涨跌幅"].fillna(-99)>=0.8)]
+        base["_rank"] = base["涨跌幅"].fillna(0)*2.1 + base["换手率"].fillna(0).clip(0,25)*0.32 + (base["成交额"].fillna(0)/1e9).clip(0,15)
+        base=base.sort_values("_rank",ascending=False).head(90)
+
+        active_stocks=[]
+        for _,r in base.iterrows():
+            active_stocks.append({
+                "code":str(r.get("代码","")).zfill(6),"name":str(r.get("名称","")),"price":round(_num(r.get("最新价")),3),
+                "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":0.0,"turnover_rate":round(_num(r.get("换手率")),2),
+                "amount":_num(r.get("成交额")),"high":_num(r.get("最高")),"low":_num(r.get("最低")),
+                "open":_num(r.get("今开")),"prev_close":_num(r.get("昨收")),"industry":"",
+            })
+        # Include limit-up stocks omitted by liquidity filter.
+        seen={x["code"] for x in active_stocks}
+        spot_map={str(r.get("代码","")).zfill(6):r for _,r in spot.iterrows()}
         for lu in limitup_stocks:
-            if lu["code"] in seen_codes:
-                # 补行业
-                for x in active_stocks:
-                    if x["code"] == lu["code"] and not x.get("industry"):
-                        x["industry"] = lu.get("industry", "")
-                continue
-            r = spot_map.get(lu["code"], {})
+            if lu["code"] in seen: continue
+            r=spot_map.get(lu["code"],{})
             active_stocks.append({
                 "code":lu["code"],"name":lu["name"],"price":round(_num(getattr(r,'get',lambda *a:0)("最新价")),3),
-                "pct":round(_num(getattr(r,'get',lambda *a:lu.get('pct',0))("涨跌幅")),2),
-                "volume_ratio":round(_num(getattr(r,'get',lambda *a:0)("量比")),2),
-                "turnover_rate":round(_num(getattr(r,'get',lambda *a:0)("换手率")),2),
-                "amount":_num(getattr(r,'get',lambda *a:0)("成交额")), "high":_num(getattr(r,'get',lambda *a:0)("最高")),
-                "low":_num(getattr(r,'get',lambda *a:0)("最低")),"open":_num(getattr(r,'get',lambda *a:0)("今开")),
-                "prev_close":_num(getattr(r,'get',lambda *a:0)("昨收")),"industry":lu.get("industry", ""),
+                "pct":round(_num(getattr(r,'get',lambda *a:lu.get('pct',0))("涨跌幅")),2),"volume_ratio":0.0,
+                "turnover_rate":round(_num(getattr(r,'get',lambda *a:0)("换手率")),2),"amount":_num(getattr(r,'get',lambda *a:0)("成交额")),
+                "high":_num(getattr(r,'get',lambda *a:0)("最高")),"low":_num(getattr(r,'get',lambda *a:0)("最低")),
+                "open":_num(getattr(r,'get',lambda *a:0)("今开")),"prev_close":_num(getattr(r,'get',lambda *a:0)("昨收")),"industry":"",
             })
 
+        # Enrich the most relevant names with a true 5-day volume ratio from daily K-lines.
+        def vr_work(x):
+            try:
+                hist,_=fetch_history_df(x["code"], 12)
+                if len(hist)<6:return x["code"],0.0
+                v=pd.to_numeric(hist["volume"],errors="coerce").dropna()
+                if len(v)<6:return x["code"],0.0
+                prev5=float(v.iloc[-6:-1].mean()); return x["code"],(float(v.iloc[-1])/prev5 if prev5>0 else 0.0)
+            except Exception:return x["code"],0.0
+        vr_map={}
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs=[ex.submit(vr_work,x) for x in active_stocks[:32]]
+            for fut in as_completed(futs):
+                c,v=fut.result(); vr_map[c]=v
+        for x in active_stocks:
+            if x["code"] in vr_map: x["volume_ratio"]=round(vr_map[x["code"]],2)
+
+        rv=spot.copy(); rv=rv[~rv["名称"].astype(str).str.upper().str.contains("ST|退",regex=True,na=False)]
+        rv=rv[(rv["成交额"].fillna(0)>=1.2e8) & (rv["涨跌幅"].fillna(-99)>=-6.5)]
+        rv["_rr"]=(rv["成交额"].fillna(0)/1e9).clip(0,20)*1.8 + rv["涨跌幅"].abs().fillna(0)*.35
+        rv=rv.sort_values("_rr",ascending=False).head(140)
+        review_universe=[]
+        for _,r in rv.iterrows():
+            review_universe.append({
+                "code":str(r.get("代码","")).zfill(6),"name":str(r.get("名称","")),"price":round(_num(r.get("最新价")),3),
+                "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":0.0,"turnover_rate":round(_num(r.get("换手率")),2),
+                "amount":_num(r.get("成交额")),"high":_num(r.get("最高")),"low":_num(r.get("最低")),
+                "open":_num(r.get("今开")),"prev_close":_num(r.get("昨收")),"industry":"",
+            })
+
+        quality = "full" if full_market else "partial"
+        source_errors=list(meta.get("errors") or [])
+        if board_errors: source_errors.append("连板历史部分失败")
+        notice = None if full_market else f"新浪快照仅取得 {len(spot)} / {meta.get('expected') or '?'} 只，市场广度不参与情绪评分；个股候选仍使用真实已取得行情。"
+
         return {
-            "source": f"AKShare / {spot_source}",
-            "is_live": True,
-            "source_errors": errors,
-            "trade_date": datetime.strptime(date, "%Y%m%d").strftime("%Y-%m-%d"),
-            "updated_at": now.isoformat(timespec="seconds"),
-            "market_status": _market_status(now),
-            "zt_count": zt_count,
-            "zb_count": zb_count,
-            "dt_count": dt_count,
-            "seal_rate": seal_rate,
-            "yesterday_premium": yesterday_premium,
-            "yesterday_lianban_premium": yesterday_lianban_premium,
-            "up_count": up_count,
-            "down_count": down_count,
-            "flat_count": flat_count,
-            "turnover": turnover,
-            "max_board": max_board,
-            "promotion_rates": promotions,
-            "ladder": ladder[:10],
-            "themes": themes,
-            "concepts": concepts,
-            "auction": auction,
-            "active_stocks": active_stocks,
-            "review_universe": review_universe,
-            "limitup_stocks": limitup_stocks,
+            "source":"新浪财经实时快照 + 腾讯/新浪K线",
+            "is_live":True,
+            "source_errors":source_errors[:20],
+            "source_status":{
+                "sina_snapshot":meta,
+                "history":"腾讯财经→新浪财经K线回退",
+                "quality":quality,
+            },
+            "data_quality":quality,
+            "coverage":meta.get("coverage"),
+            "notice":notice,
+            "trade_date":datetime.strptime(date,"%Y%m%d").strftime("%Y-%m-%d"),
+            "updated_at":now.isoformat(timespec="seconds"),
+            "market_status":_market_status(now),
+            "zt_count":int(zt_count),"zb_count":int(zb_count),"dt_count":int(dt_count),"seal_rate":seal_rate,
+            "yesterday_premium":None,"yesterday_lianban_premium":None,
+            "up_count":up_count,"down_count":down_count,"flat_count":flat_count,"turnover":turnover,
+            "max_board":int(max_board),"promotion_rates":[],"ladder":ladder[:10],"themes":[],"concepts":[],
+            "auction":{"avg_gap":None,"red_ratio":None,"strong_ratio":None,"leaders":[]},
+            "active_stocks":active_stocks,"review_universe":review_universe,"limitup_stocks":limitup_stocks,
         }
 
 
@@ -410,21 +354,14 @@ def _market_status(now: datetime) -> str:
     if now.weekday() >= 5:
         return "休市"
     t = now.time()
-    if time(9, 15) <= t < time(9, 25):
-        return "集合竞价"
-    if time(9, 25) <= t < time(9, 30):
-        return "竞价结束"
-    if time(9, 30) <= t <= time(11, 30) or time(13, 0) <= t <= time(15, 0):
-        return "交易中"
-    if time(11, 30) < t < time(13, 0):
-        return "午间休市"
+    if time(9, 15) <= t < time(9, 25): return "集合竞价"
+    if time(9, 25) <= t < time(9, 30): return "竞价结束"
+    if time(9, 30) <= t <= time(11, 30) or time(13, 0) <= t <= time(15, 0): return "交易中"
+    if time(11, 30) < t < time(13, 0): return "午间休市"
     return "已收盘" if t > time(15, 0) else "未开盘"
 
 
 def get_provider(force_demo: bool = False):
     if force_demo:
         return DemoProvider()
-    try:
-        return AKShareProvider()
-    except Exception:
-        return DemoProvider()
+    return DirectPublicProvider()
