@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: signal-desk-pro
+    runtime: docker
+    plan: free
+    region: singapore
+    autoDeploy: true
+    healthCheckPath: /api/health
+    envVars:
+      - key: CACHE_SECONDS
+        value: "75"
+      - key: NEWSNOW_BASE_URL
+        value: https://newsnow.busiyi.world
+      - key: NEWS_TIMEOUT
+        value: "6"
+      - key: HOTSPOT_DESK_URL
+        value: https://hotspot-link-desk.sl604762568.chatgpt.site
+      - key: DB_PATH
+        value: /tmp/signal_desk_sentiment.db
