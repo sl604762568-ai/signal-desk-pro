@@ -10,6 +10,7 @@ import queue as queue_mod
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
+from pydantic import BaseModel
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query, Request
@@ -26,6 +27,10 @@ from review_selector import build_review_picks
 from stock_analysis import analyze_stock
 from nextday_selector import build_next5
 from sector_engine import build_sector_review, fetch_board_members, sector_context_for_stock
+from paper_trader import (init_paper_db, get_settings as get_paper_settings, save_settings as save_paper_settings,
+                          reset_account as reset_paper_account, store_signals as store_paper_signals,
+                          has_signals_for, run_engine as run_paper_engine, get_portfolio as get_paper_portfolio,
+                          performance as get_paper_performance)
 
 BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
@@ -33,7 +38,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.8.2-live-refresh-fix")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.9-paper-trading")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -255,9 +260,47 @@ def _refresh_meta() -> Dict[str, Any]:
     }
 
 
+_paper_loop_started = False
+
+def _paper_sync_signals(data: Dict[str, Any], force: bool=False) -> Dict[str, Any]:
+    trade_date=str(data.get("trade_date") or datetime.now(CN_TZ).date().isoformat())[:10]
+    if (not force) and has_signals_for(DB_PATH, trade_date):
+        return {"ok":True,"saved":0,"trade_date":trade_date,"note":"当日次日5股已保存"}
+    from public_sources import fetch_history_df
+    result=build_next5(data, data.get("news") or {}, fetch_history_df, limit=5)
+    picks=result.get("picks") or []
+    saved=store_paper_signals(DB_PATH, trade_date, picks)
+    return {"ok":True,"saved":saved,"trade_date":trade_date,"environment":result.get("environment") or {},"picks":picks}
+
+def _paper_background_loop():
+    # 纯虚拟盘后台循环。免费 Render 休眠时不会运行，因此前端也会定时触发 /api/paper/run。
+    while True:
+        try:
+            cfg=get_paper_settings(DB_PATH)
+            if cfg.get("auto_enabled"):
+                _harvest_refresh()
+                data=_live_cache.get("data")
+                if data:
+                    now=datetime.now(CN_TZ)
+                    # 15:05 后保存当天“次日5股”，只做一次。
+                    if (now.hour>15 or (now.hour==15 and now.minute>=5)):
+                        try: _paper_sync_signals(data, force=False)
+                        except Exception: pass
+                    # 持仓风控和次日信号入场使用当前实时快照。
+                    try: run_paper_engine(DB_PATH, data)
+                    except Exception: pass
+        except Exception:
+            pass
+        time.sleep(60)
+
 @app.on_event("startup")
 def _startup():
     init_db()
+    init_paper_db(DB_PATH)
+    global _paper_loop_started
+    if not _paper_loop_started:
+        _paper_loop_started = True
+        threading.Thread(target=_paper_background_loop, daemon=True, name="paper-trading-loop").start()
 
 @app.get("/")
 def index(): return FileResponse(STATIC/"index.html")
@@ -353,6 +396,13 @@ def next5():
         from public_sources import fetch_history_df
         result=build_next5(data, data.get("news") or {}, fetch_history_df, limit=5)
         result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
+        now_cn=datetime.now(CN_TZ)
+        if now_cn.hour>15 or (now_cn.hour==15 and now_cn.minute>=0):
+            try:
+                sd=str(data.get("trade_date") or now_cn.date().isoformat())[:10]
+                result["paper_saved"]=store_paper_signals(DB_PATH, sd, result.get("picks") or [])
+            except Exception as _paper_exc:
+                result["paper_save_error"]=str(_paper_exc)
         return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"environment":{},"picks":[],"scanned":0,"error":f"次日联动筛选失败：{type(exc).__name__}: {exc}"})
@@ -458,6 +508,73 @@ def sector_detail(board_code: str, limit: int=Query(200,ge=20,le=500)):
         return JSONResponse({"board":{"code":board_code},"members":[],"count":0,"error":f"板块成分股失败：{type(exc).__name__}: {exc}"})
 
 
+class PaperSettingsInput(BaseModel):
+    initial_capital: float | None = None
+    max_positions: int | None = None
+    position_pct: float | None = None
+    stop_loss_pct: float | None = None
+    take_profit_pct: float | None = None
+    trailing_stop_pct: float | None = None
+    max_hold_days: int | None = None
+    min_pick_score: float | None = None
+    commission_rate: float | None = None
+    min_commission: float | None = None
+    stamp_duty_rate: float | None = None
+    slippage_rate: float | None = None
+    auto_enabled: bool | None = None
+
+class PaperResetInput(BaseModel):
+    initial_capital: float = 10000
+
+@app.get("/api/paper")
+def paper_status():
+    _harvest_refresh()
+    data=_live_cache.get("data") or {}
+    return JSONResponse(get_paper_portfolio(DB_PATH, data))
+
+@app.post("/api/paper/settings")
+def paper_settings(inp: PaperSettingsInput):
+    updates={k:v for k,v in inp.model_dump().items() if v is not None}
+    cfg=save_paper_settings(DB_PATH, updates)
+    return JSONResponse({"ok":True,"settings":cfg})
+
+@app.post("/api/paper/reset")
+def paper_reset(inp: PaperResetInput):
+    return JSONResponse({"ok":True,"portfolio":reset_paper_account(DB_PATH, inp.initial_capital)})
+
+@app.post("/api/paper/sync-picks")
+def paper_sync_picks(force: bool=False):
+    _harvest_refresh()
+    data=_live_cache.get("data")
+    if not data:
+        _start_refresh(force=False)
+        return JSONResponse({"ok":False,"error":"真实行情尚未准备好"})
+    try:
+        return JSONResponse(_paper_sync_signals(data, force=force))
+    except Exception as exc:
+        return JSONResponse({"ok":False,"error":f"保存次日5股失败：{type(exc).__name__}: {exc}"})
+
+@app.post("/api/paper/run")
+def paper_run():
+    _harvest_refresh()
+    data=_live_cache.get("data")
+    if not data:
+        _start_refresh(force=False)
+        return JSONResponse({"ok":False,"error":"真实行情尚未准备好，虚拟盘未执行"})
+    try:
+        # 手动运行时，如果已收盘且尚无当日信号，顺手保存次日5股。
+        now=datetime.now(CN_TZ)
+        if now.hour>15 or (now.hour==15 and now.minute>=5):
+            try: _paper_sync_signals(data, force=False)
+            except Exception: pass
+        return JSONResponse(run_paper_engine(DB_PATH, data))
+    except Exception as exc:
+        return JSONResponse({"ok":False,"error":f"虚拟盘执行失败：{type(exc).__name__}: {exc}"})
+
+@app.get("/api/paper/performance")
+def paper_performance(days: int=Query(30,ge=1,le=3650)):
+    return JSONResponse(get_paper_performance(DB_PATH, days))
+
 @app.get("/api/sources")
 def sources_probe():
     from public_sources import probe_sources
@@ -477,7 +594,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.8.1-stable-live",
+        "version": "6.9-paper-trading",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
