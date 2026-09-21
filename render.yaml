@@ -2,10 +2,15 @@ services:
   - type: web
     name: signal-desk-pro
     runtime: docker
-    plan: free
+    plan: 0.5c-512mb
     region: singapore
     autoDeploy: true
     healthCheckPath: /api/health
+    numInstances: 1
+    disk:
+      name: signal-desk-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: CACHE_SECONDS
         value: "75"
@@ -24,4 +29,10 @@ services:
       - key: HOTSPOT_DESK_URL
         value: https://hotspot-link-desk.sl604762568.chatgpt.site
       - key: DB_PATH
-        value: /tmp/signal_desk_sentiment.db
+        value: /var/data/signal_desk.db
+      - key: PAPER_REFRESH_SECONDS
+        value: "60"
+      - key: PAPER_MARKET_TIMEOUT
+        value: "20"
+      - key: PAPER_CACHE_MAX_AGE
+        value: "150"

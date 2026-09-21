@@ -222,6 +222,11 @@ def run_engine(db_path: Path, market: Dict[str, Any]) -> Dict[str, Any]:
             if px<=0: continue
             high=max(float(pos['high_water']),px)
             payload=json.loads(pos['payload'] or '{}')
+            # A股股票按T+1模拟：当日买入仓位当日不可卖出。
+            if str(pos.get('entry_date',''))[:10] == trade_date:
+                conn.execute('UPDATE paper_positions SET high_water=?,last_price=?,last_value=?,updated_at=? WHERE code=?',
+                             (high,px,px*int(pos['qty']),now.isoformat(timespec='seconds'),code))
+                continue
             stop=float(cfg['stop_loss_pct']); take=float(cfg['take_profit_pct']); trail=float(cfg['trailing_stop_pct'])
             reason=None
             if px <= float(pos['avg_cost'])*(1-stop): reason=f'止损 {stop*100:.1f}%'
@@ -247,9 +252,12 @@ def run_engine(db_path: Path, market: Dict[str, Any]) -> Dict[str, Any]:
         positions=[dict(r) for r in conn.execute('SELECT * FROM paper_positions').fetchall()]
         held={p['code'] for p in positions}
 
-        # 2) entries use most recent prior-day selection
+        # 2) entries use most recent prior-day selection. 云端自动盘默认只在早盘买入窗口开新仓。
         signals=latest_signals(db_path,before_date=trade_date)
         slots=max(0,int(cfg['max_positions'])-len(positions))
+        allow_entries=bool(market.get('paper_allow_entries', True))
+        if not allow_entries:
+            slots=0
         for p in signals:
             if slots<=0: break
             code=str(p.get('code','')).zfill(6)

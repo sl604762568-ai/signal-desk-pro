@@ -38,7 +38,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.9-paper-trading")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="7.0-cloud-paper")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -48,6 +48,13 @@ _lock = threading.Lock()
 # 即使第三方 SDK 永久卡住，也能被主进程终止。
 LIVE_REFRESH_TIMEOUT = int(os.getenv("LIVE_REFRESH_TIMEOUT", "45"))
 LIVE_RETRY_COOLDOWN = int(os.getenv("LIVE_RETRY_COOLDOWN", "30"))
+
+# 云端常驻虚拟盘：即使没有浏览器访问，也会在A股交易时段主动刷新行情并运行纸面交易。
+PAPER_REFRESH_SECONDS = int(os.getenv("PAPER_REFRESH_SECONDS", "60"))
+PAPER_MARKET_TIMEOUT = int(os.getenv("PAPER_MARKET_TIMEOUT", "20"))
+PAPER_CACHE_MAX_AGE = int(os.getenv("PAPER_CACHE_MAX_AGE", "150"))
+_paper_rt_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+_paper_rt: Dict[str, Any] = {"process": None, "queue": None, "started": 0.0, "state": "idle", "error": None, "elapsed": None}
 _live_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 _refresh: Dict[str, Any] = {
     "process": None, "queue": None, "started": 0.0, "last_attempt": 0.0,
@@ -260,6 +267,113 @@ def _refresh_meta() -> Dict[str, Any]:
     }
 
 
+
+def _paper_market_worker(out_q) -> None:
+    try:
+        provider = get_provider(force_demo=False)
+        market = provider.fetch(fast=True)
+        market["sentiment"] = score_sentiment(market)
+        out_q.put({"ok": True, "data": market})
+    except BaseException as exc:
+        out_q.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _paper_rt_harvest() -> None:
+    proc = _paper_rt.get("process")
+    q = _paper_rt.get("queue")
+    if proc is None:
+        return
+    msg = None
+    if q is not None:
+        try:
+            msg = q.get_nowait()
+        except queue_mod.Empty:
+            pass
+        except Exception:
+            pass
+    if msg is not None:
+        elapsed = round(time.time() - float(_paper_rt.get("started") or time.time()), 2)
+        if msg.get("ok") and isinstance(msg.get("data"), dict):
+            _paper_rt_cache.update({"ts": time.time(), "data": msg["data"]})
+            _paper_rt.update({"state": "ok", "error": None, "elapsed": elapsed})
+        else:
+            _paper_rt.update({"state": "error", "error": msg.get("error") or "unknown", "elapsed": elapsed})
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=1)
+        _paper_rt["process"] = None
+        _paper_rt["queue"] = None
+        return
+    elapsed = time.time() - float(_paper_rt.get("started") or time.time())
+    if proc.is_alive() and elapsed > PAPER_MARKET_TIMEOUT:
+        proc.terminate(); proc.join(timeout=2)
+        _paper_rt.update({"process": None, "queue": None, "state": "timeout", "error": f"纸面交易行情刷新超过 {PAPER_MARKET_TIMEOUT}s，已终止", "elapsed": round(elapsed,2)})
+        return
+    if not proc.is_alive():
+        proc.join(timeout=.2)
+        _paper_rt.update({"process": None, "queue": None})
+        if _paper_rt.get("state") == "running":
+            _paper_rt.update({"state": "error", "error": "纸面交易行情进程提前退出"})
+
+
+def _paper_rt_start(force: bool=False) -> None:
+    _paper_rt_harvest()
+    proc = _paper_rt.get("process")
+    if proc is not None and proc.is_alive():
+        return
+    age = time.time() - float(_paper_rt_cache.get("ts") or 0)
+    if not force and _paper_rt_cache.get("data") and age < PAPER_REFRESH_SECONDS:
+        return
+    q = _mp_ctx.Queue(maxsize=1)
+    p = _mp_ctx.Process(target=_paper_market_worker, args=(q,), daemon=True)
+    p.start()
+    _paper_rt.update({"process": p, "queue": q, "started": time.time(), "state": "running", "error": None, "elapsed": None})
+
+
+def _cn_minutes(now: datetime) -> int:
+    return now.hour * 60 + now.minute
+
+
+def _paper_trade_session(now: datetime) -> bool:
+    if now.weekday() >= 5:
+        return False
+    m = _cn_minutes(now)
+    return (9*60+25 <= m <= 11*60+30) or (13*60 <= m <= 15*60)
+
+
+def _paper_entry_session(now: datetime) -> bool:
+    if now.weekday() >= 5:
+        return False
+    m = _cn_minutes(now)
+    return 9*60+35 <= m <= 10*60+45
+
+
+def _paper_close_sync_window(now: datetime) -> bool:
+    if now.weekday() >= 5:
+        return False
+    m = _cn_minutes(now)
+    return 15*60+5 <= m <= 23*60+30
+
+
+def _paper_daemon_status() -> Dict[str, Any]:
+    _paper_rt_harvest()
+    now = datetime.now(CN_TZ)
+    return {
+        "cloud_daemon": True,
+        "cn_time": now.isoformat(timespec="seconds"),
+        "trade_session": _paper_trade_session(now),
+        "entry_session": _paper_entry_session(now),
+        "close_sync_window": _paper_close_sync_window(now),
+        "refresh_seconds": PAPER_REFRESH_SECONDS,
+        "market_refresh": {
+            "state": _paper_rt.get("state"), "error": _paper_rt.get("error"), "elapsed": _paper_rt.get("elapsed"),
+            "has_cache": bool(_paper_rt_cache.get("data")),
+            "cache_age": round(time.time()-float(_paper_rt_cache.get("ts") or time.time()),1) if _paper_rt_cache.get("data") else None,
+        },
+        "storage": str(DB_PATH),
+        "note": "云端常驻模式：无需手机/电脑在线。买入窗口默认09:35-10:45；持仓风控在交易时段持续检查；收盘后自动保存次日5股。",
+    }
+
 _paper_loop_started = False
 
 def _paper_sync_signals(data: Dict[str, Any], force: bool=False) -> Dict[str, Any]:
@@ -273,25 +387,45 @@ def _paper_sync_signals(data: Dict[str, Any], force: bool=False) -> Dict[str, An
     return {"ok":True,"saved":saved,"trade_date":trade_date,"environment":result.get("environment") or {},"picks":picks}
 
 def _paper_background_loop():
-    # 纯虚拟盘后台循环。免费 Render 休眠时不会运行，因此前端也会定时触发 /api/paper/run。
+    last_engine_cache_ts = 0.0
+    last_close_sync_date = None
     while True:
         try:
-            cfg=get_paper_settings(DB_PATH)
+            cfg = get_paper_settings(DB_PATH)
+            now = datetime.now(CN_TZ)
             if cfg.get("auto_enabled"):
-                _harvest_refresh()
-                data=_live_cache.get("data")
-                if data:
-                    now=datetime.now(CN_TZ)
-                    # 15:05 后保存当天“次日5股”，只做一次。
-                    if (now.hour>15 or (now.hour==15 and now.minute>=5)):
-                        try: _paper_sync_signals(data, force=False)
-                        except Exception: pass
-                    # 持仓风控和次日信号入场使用当前实时快照。
-                    try: run_paper_engine(DB_PATH, data)
-                    except Exception: pass
+                if _paper_trade_session(now):
+                    _paper_rt_start(force=False)
+                    _paper_rt_harvest()
+                    data = _paper_rt_cache.get("data")
+                    cache_ts = float(_paper_rt_cache.get("ts") or 0)
+                    age = time.time() - cache_ts if cache_ts else 1e9
+                    if data and age <= PAPER_CACHE_MAX_AGE and cache_ts > last_engine_cache_ts:
+                        data = dict(data)
+                        data["paper_allow_entries"] = _paper_entry_session(now)
+                        try:
+                            run_paper_engine(DB_PATH, data)
+                            last_engine_cache_ts = cache_ts
+                        except Exception as exc:
+                            _paper_rt["error"] = f"paper engine: {type(exc).__name__}: {exc}"
+                if _paper_close_sync_window(now) and last_close_sync_date != now.date().isoformat():
+                    try:
+                        _start_refresh(force=True)
+                        deadline = time.time() + LIVE_REFRESH_TIMEOUT + 5
+                        while time.time() < deadline:
+                            _harvest_refresh()
+                            if _refresh.get("state") in ("ok","error","timeout") and _refresh.get("process") is None:
+                                break
+                            time.sleep(1)
+                        full = _live_cache.get("data")
+                        if full:
+                            _paper_sync_signals(full, force=False)
+                            last_close_sync_date = now.date().isoformat()
+                    except Exception as exc:
+                        _refresh["error"] = f"close sync: {type(exc).__name__}: {exc}"
         except Exception:
             pass
-        time.sleep(60)
+        time.sleep(5)
 
 @app.on_event("startup")
 def _startup():
@@ -526,6 +660,10 @@ class PaperSettingsInput(BaseModel):
 class PaperResetInput(BaseModel):
     initial_capital: float = 10000
 
+@app.get("/api/paper/daemon")
+def paper_daemon():
+    return JSONResponse({"ok": True, **_paper_daemon_status()})
+
 @app.get("/api/paper")
 def paper_status():
     _harvest_refresh()
@@ -594,7 +732,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.9-paper-trading",
+        "version": "7.0-cloud-paper",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#080b12"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <link rel="manifest" href="/manifest.webmanifest"/>
-<title>Signal Desk Pro v6.9 · 虚拟盘×板块复盘×缠论</title>
+<title>Signal Desk Pro v7.0 · 云端自动虚拟盘×板块复盘×缠论</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
 :root{--bg:#070a10;--panel:#0d111a;--panel2:#111722;--line:#202938;--line2:#2d394d;--txt:#eef3fb;--muted:#8b98aa;--red:#ff5d65;--green:#2bd78d;--amber:#ffbd4a;--blue:#6ea8ff;--purple:#9b83ff;--cyan:#61d8ff;--shadow:0 18px 45px rgba(0,0,0,.28)}
@@ -104,7 +104,7 @@
     <label>最长持仓天数<input id="paperDays" type="number" min="1" max="30" step="1" value="5"><span>天</span></label>
     <label>最低候选分<input id="paperMinScore" type="number" min="0" max="100" step="1" value="65"></label>
     <label class="paperToggle"><input id="paperAuto" type="checkbox" checked> 自动虚拟交易</label>
-  </div><div class="paperBtnRow"><button class="btn primary" onclick="savePaperSettings()">保存设置</button><button class="btn" onclick="resetPaper()">重置模拟盘</button></div><div class="paperHint" id="paperHint">自动模式：收盘后保存“次日5股”，下一交易日按实时条件决定是否虚拟买入；持仓按止损/止盈/移动止盈/关键位自动卖出。免费 Render 休眠时后台不会持续运行，网页打开后会继续自动检查。</div></div>
+  </div><div class="paperBtnRow"><button class="btn primary" onclick="savePaperSettings()">保存设置</button><button class="btn" onclick="resetPaper()">重置模拟盘</button></div><div class="paperHint" id="paperHint">云端常驻模式：手机和电脑都可关闭。服务器盘中约每60秒主动刷新行情；09:35-10:45按次日5股与实时条件模拟开仓，交易时段持续执行止损/止盈/移动止盈；收盘后自动保存下一交易日信号。</div></div>
   <div class="panel pad c8"><div class="paperChartHead"><div><div class="eyebrow">FORWARD TEST EQUITY</div><h3 style="margin:4px 0 0;font-size:14px">虚拟净值曲线</h3></div><select id="paperPerfDays" onchange="loadPaperPerformance()"><option value="7">7天</option><option value="30" selected>30天</option><option value="90">90天</option><option value="180">180天</option></select></div><div id="paperChart" class="paperChart"></div><div class="paperPerf" id="paperPerf"><span>收益率 --</span><span>最大回撤 --</span><span>胜率 --</span><span>盈亏比 --</span></div></div>
 </div>
 <div class="grid" style="margin-top:10px">
@@ -142,7 +142,7 @@
 <script>
 const STAGES=['冰点','修复','升温','主升','高潮','强高潮','分歧','退潮','过热'];
 let demoMode=false, dashboard=null, charts={}, analysisData=null, analysisTf='daily';
-console.info('Signal Desk Pro frontend v6.9-paper-trading');
+console.info('Signal Desk Pro frontend v7.0-cloud-paper');
 const $=id=>document.getElementById(id);
 const num=(v,d=0)=>Number.isFinite(Number(v))?Number(v):d;
 const fmtPct=v=>`${num(v)>=0?'+':''}${num(v).toFixed(2)}%`;
@@ -218,7 +218,11 @@ function renderPaper(d){
   $('paperTrades').innerHTML=tr.length?tr.slice(0,20).map(x=>`<div class="paperTrade"><b class="${x.side==='BUY'?'buy':'sell'}">${x.side==='BUY'?'买入':'卖出'} ${esc(x.name)} ${esc(x.code)}</b><br>${x.qty}股 × ${cashFmt(x.price)} · 费用 ${cashFmt(x.fees)}${x.pnl==null?'':` · 盈亏 <span class="${num(x.pnl)>=0?'red':'green'}">${cashFmt(x.pnl)}</span>`}<br><span class="subtle">${esc(x.trade_date)} · ${esc(x.reason||'')}</span></div>`).join(''):'<div class="label">暂无成交记录</div>';
 }
 async function loadPaper(){
-  try{let r=await fetch('/api/paper',{cache:'no-store'});let d=await r.json();renderPaper(d);await loadPaperPerformance()}catch(e){$('paperHint').textContent='虚拟盘接口暂不可用：'+e.message}
+  try{
+    let [r,dr]=await Promise.all([fetch('/api/paper',{cache:'no-store'}),fetch('/api/paper/daemon',{cache:'no-store'})]);
+    let d=await r.json();let dd=await dr.json();renderPaper(d);await loadPaperPerformance();
+    if(dd.ok){let st=dd.market_refresh||{};$('paperHint').textContent=`云端自动盘：${d.settings?.auto_enabled?'已启用':'已关闭'} · 行情进程 ${st.state||'--'} · ${dd.trade_session?'交易时段':'非交易时段'} · 手机/电脑无需在线 · 数据持久化 ${dd.storage||'--'}`;}
+  }catch(e){$('paperHint').textContent='虚拟盘接口暂不可用：'+e.message}
 }
 async function savePaperSettings(){
   const body={initial_capital:Math.max(10000,num($('paperCapital').value,10000)),max_positions:parseInt($('paperMaxPos').value||3),position_pct:num($('paperPosPct').value,33)/100,stop_loss_pct:num($('paperStop').value,5)/100,take_profit_pct:num($('paperTake').value,8)/100,trailing_stop_pct:num($('paperTrail').value,4)/100,max_hold_days:parseInt($('paperDays').value||5),min_pick_score:num($('paperMinScore').value,65),auto_enabled:$('paperAuto').checked};
@@ -284,6 +288,6 @@ async function loadDashboard(fresh=false){
 function toggleDemo(){demoMode=!demoMode;$('demoBtn').textContent=demoMode?'真实':'演示';loadDashboard(true)}
 function closeModal(){$('modal').classList.remove('show')}
 async function openStock(code,name){$('modal').classList.add('show');$('modalTitle').textContent=`${name} ${code}`;$('modalSub').textContent='正在加载近70个交易日K线…';if(charts.k){charts.k.dispose();charts.k=null}charts.k=echarts.init($('kchart'));charts.k.showLoading({color:'#8b76ff',textColor:'#8797ad',maskColor:'rgba(10,15,23,.5)'});try{let r=await fetch(`/api/stock/${code}`);let d=await r.json();charts.k.hideLoading();if(!d.rows?.length){$('modalSub').textContent=d.error||'暂无K线数据';return}let rows=d.rows;let dates=rows.map(x=>x.date),ohlc=rows.map(x=>[x.open,x.close,x.low,x.high]),vol=rows.map(x=>x.volume);$('modalSub').textContent='近70个交易日 · 前复权 · 点击候选仅用于量价核验';charts.k.setOption({animation:false,axisPointer:{link:[{xAxisIndex:'all'}]},tooltip:{trigger:'axis'},grid:[{left:48,right:14,top:25,height:'62%'},{left:48,right:14,top:'72%',height:'17%'}],xAxis:[{type:'category',data:dates,boundaryGap:true,axisLabel:{color:'#74849a',fontSize:9},axisLine:{lineStyle:{color:'#263249'}},min:'dataMin',max:'dataMax'},{type:'category',gridIndex:1,data:dates,axisLabel:{show:false},axisLine:{lineStyle:{color:'#263249'}},axisTick:{show:false}}],yAxis:[{scale:true,axisLabel:{color:'#74849a',fontSize:9},splitLine:{lineStyle:{color:'#1c2635'}}},{gridIndex:1,scale:true,axisLabel:{color:'#74849a',fontSize:9},splitLine:{show:false}}],dataZoom:[{type:'inside',xAxisIndex:[0,1],start:25,end:100}],series:[{name:'K',type:'candlestick',data:ohlc,itemStyle:{color:'#ff5d65',color0:'#2bd78d',borderColor:'#ff5d65',borderColor0:'#2bd78d'}},{name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,data:vol,itemStyle:{color:'#526987'}}]})}catch(e){charts.k.hideLoading();$('modalSub').textContent='K线接口暂不可用'}setTimeout(()=>charts.k&&charts.k.resize(),50)}
-initCharts();loadDashboard();setTimeout(()=>loadSectorReview(false),1800);setTimeout(()=>loadPaper(),2300);setInterval(()=>{if(!demoMode)loadDashboard(false)},90000);setInterval(()=>{if($('paperAuto')?.checked)runPaperEngine(true)},60000);if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+initCharts();loadDashboard();setTimeout(()=>loadSectorReview(false),1800);setTimeout(()=>loadPaper(),2300);setInterval(()=>{if(!demoMode)loadDashboard(false)},90000);if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 </body></html>
