@@ -305,6 +305,29 @@ def get_portfolio(db_path: Path, market: Dict[str, Any]) -> Dict[str, Any]:
         positions=[dict(r) for r in conn.execute('SELECT * FROM paper_positions ORDER BY entry_date, code').fetchall()]
         trades=[dict(r) for r in conn.execute('SELECT * FROM paper_trades ORDER BY id DESC LIMIT 100').fetchall()]
         eq=[dict(r) for r in conn.execute('SELECT * FROM paper_equity ORDER BY ts DESC LIMIT 500').fetchall()]
+    for t in trades:
+        try:
+            payload=json.loads(t.get('payload') or '{}')
+        except Exception:
+            payload={}
+        reasons=payload.get('reasons') or []
+        risks=payload.get('risks') or []
+        tech=payload.get('technical') or {}
+        t['decision_reason']=t.get('reason') or ('；'.join(reasons[:3]) if reasons else '策略条件触发')
+        parts=[]
+        if payload.get('technical_score') is not None: parts.append(f"技术分 {float(payload.get('technical_score') or 0):.0f}")
+        if tech.get('macd') is not None: parts.append(f"MACD {float(tech.get('macd') or 0):.2f}")
+        if tech.get('ma20') is not None: parts.append(f"MA20 {float(tech.get('ma20') or 0):.2f}")
+        if payload.get('support') is not None: parts.append(f"支撑 {float(payload.get('support') or 0):.2f}")
+        if payload.get('resistance') is not None: parts.append(f"压力 {float(payload.get('resistance') or 0):.2f}")
+        t['technical_note']=' · '.join(parts) if parts else ('；'.join(reasons[-2:]) if reasons else '无额外技术摘要')
+        info=[]
+        if payload.get('sector_name'): info.append(f"题材/板块 {payload.get('sector_name')}")
+        if payload.get('sector_score') is not None: info.append(f"板块分 {float(payload.get('sector_score') or 0):.0f}")
+        if payload.get('market_score') is not None: info.append(f"市场分 {float(payload.get('market_score') or 0):.0f}")
+        if reasons: info.extend([str(x) for x in reasons[:2]])
+        if risks: info.append('风险：'+str(risks[0]))
+        t['info_note']='；'.join(info) if info else '无额外信息面摘要'
     cash=float(acc['cash']); initial=float(acc['initial_capital']); mv=0.0; unreal=0.0
     for p in positions:
         snap=_find_snapshot(market,p['code']) if market else None

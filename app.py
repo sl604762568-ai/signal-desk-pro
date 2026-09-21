@@ -27,6 +27,7 @@ from review_selector import build_review_picks
 from stock_analysis import analyze_stock
 from nextday_selector import build_next5
 from sector_engine import build_sector_review, fetch_board_members, sector_context_for_stock
+from review_engine import build_close_review
 from paper_trader import (init_paper_db, get_settings as get_paper_settings, save_settings as save_paper_settings,
                           reset_account as reset_paper_account, store_signals as store_paper_signals,
                           has_signals_for, run_engine as run_paper_engine, get_portfolio as get_paper_portfolio,
@@ -39,7 +40,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.9.2-full-market-fast")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.10-review-first")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -353,6 +354,22 @@ def dashboard(mode: str=Query("auto",pattern="^(auto|demo)$"), fresh: bool=False
     data["notice"] = "真实行情正在后台刷新；本次请求没有等待第三方接口。"
     return JSONResponse(data)
 
+
+
+_close_review_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+@app.get("/api/close-review")
+def close_review(fresh: bool=False):
+    now=time.time()
+    if (not fresh) and _close_review_cache.get("data") and now-float(_close_review_cache.get("ts") or 0)<90:
+        return JSONResponse(_close_review_cache["data"])
+    try:
+        data=build_close_review()
+    except Exception as exc:
+        data={"ok":False,"verified":False,"error":f"收盘复盘数据失败：{type(exc).__name__}: {exc}"}
+    _close_review_cache.update({"ts":now,"data":data})
+    return JSONResponse(data)
+
 @app.get("/api/review-picks")
 def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
     if mode == "demo":
@@ -655,7 +672,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.9.1-manual-paper",
+        "version": "6.10-review-first",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

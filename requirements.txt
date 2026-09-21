@@ -3,3 +3,4 @@ uvicorn[standard]>=0.27
 pandas>=2.0
 requests>=2.31
 beautifulsoup4>=4.12
+levistock==0.1.7
