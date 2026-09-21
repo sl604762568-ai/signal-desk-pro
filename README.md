@@ -1,3 +1,7 @@
+# Signal Desk Pro v6.9.2
+
+本版重点修复全市场统计失真与刷新慢。详见 README_V6_9_2.md。
+
 # Signal Desk Pro v6.9
 
 当前版本：**6.9-paper-trading**。在 v6.8 的板块复盘、次日5股、单股缠论诊断基础上，新增纯虚拟盘自动纸面交易与前向回测。

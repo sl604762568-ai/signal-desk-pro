@@ -39,7 +39,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.9.1-manual-paper")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.9.2-full-market-fast")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -47,8 +47,8 @@ _lock = threading.Lock()
 
 # 真实行情不再占用 HTTP 请求线程。后台独立进程最多运行 LIVE_REFRESH_TIMEOUT 秒；
 # 即使第三方 SDK 永久卡住，也能被主进程终止。
-LIVE_REFRESH_TIMEOUT = int(os.getenv("LIVE_REFRESH_TIMEOUT", "45"))
-LIVE_RETRY_COOLDOWN = int(os.getenv("LIVE_RETRY_COOLDOWN", "30"))
+LIVE_REFRESH_TIMEOUT = int(os.getenv("LIVE_REFRESH_TIMEOUT", "18"))
+LIVE_RETRY_COOLDOWN = int(os.getenv("LIVE_RETRY_COOLDOWN", "15"))
 _live_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 _refresh: Dict[str, Any] = {
     "process": None, "queue": None, "started": 0.0, "last_attempt": 0.0,

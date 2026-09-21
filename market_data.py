@@ -163,11 +163,17 @@ class DirectPublicProvider:
 
     def fetch(self, fast: bool = False) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from public_sources import fetch_sina_all_a, fetch_sina_fast_snapshot, fetch_history_df, limit_pct
+        from public_sources import fetch_full_market_snapshot, fetch_sina_fast_snapshot, fetch_history_df, limit_pct
 
         now = datetime.now(CN_TZ)
         date = self._latest_trade_date()
-        spot, meta = (fetch_sina_fast_snapshot() if fast else fetch_sina_all_a())
+        # Even the fast dashboard path uses a *complete* market snapshot when possible.
+        # Partial ranked slices are allowed only as a last-resort fallback and are never
+        # used for full-market breadth / limit-up statistics.
+        try:
+            spot, meta = fetch_full_market_snapshot()
+        except Exception:
+            spot, meta = fetch_sina_fast_snapshot()
         if spot is None or spot.empty or "code" not in spot.columns:
             raise RuntimeError("新浪全A快照无可用数据")
 
@@ -176,11 +182,11 @@ class DirectPublicProvider:
             "code":"代码", "name":"名称", "trade":"最新价", "changepercent":"涨跌幅",
             "settlement":"昨收", "open":"今开", "high":"最高", "low":"最低",
             "volume":"成交量", "amount":"成交额", "turnoverratio":"换手率",
-            "mktcap":"总市值", "nmc":"流通市值",
+            "mktcap":"总市值", "nmc":"流通市值", "volume_ratio":"量比",
         }
         spot = spot.rename(columns={k:v for k,v in rename.items() if k in spot.columns}).copy()
         spot["代码"] = spot["代码"].astype(str).str.zfill(6)
-        for col in ["最新价","涨跌幅","昨收","今开","最高","最低","成交量","成交额","换手率","总市值","流通市值"]:
+        for col in ["最新价","涨跌幅","昨收","今开","最高","最低","成交量","成交额","换手率","量比","总市值","流通市值"]:
             if col in spot.columns:
                 spot[col] = pd.to_numeric(spot[col], errors="coerce")
             else:
@@ -196,17 +202,26 @@ class DirectPublicProvider:
             up_count = down_count = flat_count = None
         turnover = float(pd.to_numeric(spot["成交额"], errors="coerce").fillna(0).sum()) if full_market else 0.0
 
-        # Mechanical daily price-limit reconstruction from current snapshot.
+        # Reconstruct daily price-limit states from *price levels*, not from a loose
+        # percentage threshold.  This avoids falsely counting IPO/no-limit stocks whose
+        # daily return happens to be >10%.  A-share limit prices are rounded to ¥0.01.
+        from decimal import Decimal, ROUND_HALF_UP
+        def _limit_price(prev: float, pct: float, direction: int) -> float:
+            if prev <= 0: return 0.0
+            factor = Decimal("1") + (Decimal(str(pct))/Decimal("100"))*Decimal(str(direction))
+            return float((Decimal(str(prev))*factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         zt_rows=[]; dt_rows=[]; zb_rows=[]
         for _, r in spot.iterrows():
             code=str(r.get("代码","")).zfill(6); name=str(r.get("名称", ""))
-            p=_num(r.get("涨跌幅")); prev=_num(r.get("昨收")); high=_num(r.get("最高")); lp=limit_pct(code,name)
-            high_pct=(high/prev-1)*100 if prev>0 and high>0 else -999
-            if p >= lp - 0.35:
+            price=_num(r.get("最新价")); prev=_num(r.get("昨收")); high=_num(r.get("最高")); lp=limit_pct(code,name)
+            if price<=0 or prev<=0: continue
+            up_px=_limit_price(prev,lp,1); dn_px=_limit_price(prev,lp,-1)
+            tol=0.011
+            if abs(price-up_px) <= tol:
                 zt_rows.append(r)
-            if p <= -lp + 0.35:
+            if abs(price-dn_px) <= tol:
                 dt_rows.append(r)
-            if high_pct >= lp - 0.30 and p < lp - 0.60:
+            if high >= up_px-tol and price < up_px-tol:
                 zb_rows.append(r)
         zt=pd.DataFrame(zt_rows); dtgc=pd.DataFrame(dt_rows); zbgc=pd.DataFrame(zb_rows)
         zt_count=len(zt); dt_count=len(dtgc); zb_count=len(zbgc)
@@ -278,7 +293,7 @@ class DirectPublicProvider:
         for _,r in base.iterrows():
             active_stocks.append({
                 "code":str(r.get("代码","")).zfill(6),"name":str(r.get("名称","")),"price":round(_num(r.get("最新价")),3),
-                "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":0.0,"turnover_rate":round(_num(r.get("换手率")),2),
+                "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":round(_num(r.get("量比")),2),"turnover_rate":round(_num(r.get("换手率")),2),
                 "amount":_num(r.get("成交额")),"high":_num(r.get("最高")),"low":_num(r.get("最低")),
                 "open":_num(r.get("今开")),"prev_close":_num(r.get("昨收")),"industry":"",
                 "market_cap":_num(r.get("总市值"))*10000,"float_market_cap":_num(r.get("流通市值"))*10000,
@@ -291,7 +306,7 @@ class DirectPublicProvider:
             r=spot_map.get(lu["code"],{})
             active_stocks.append({
                 "code":lu["code"],"name":lu["name"],"price":round(_num(getattr(r,'get',lambda *a:0)("最新价")),3),
-                "pct":round(_num(getattr(r,'get',lambda *a:lu.get('pct',0))("涨跌幅")),2),"volume_ratio":0.0,
+                "pct":round(_num(getattr(r,'get',lambda *a:lu.get('pct',0))("涨跌幅")),2),"volume_ratio":round(_num(getattr(r,'get',lambda *a:0)("量比")),2),
                 "turnover_rate":round(_num(getattr(r,'get',lambda *a:0)("换手率")),2),"amount":_num(getattr(r,'get',lambda *a:0)("成交额")),
                 "high":_num(getattr(r,'get',lambda *a:0)("最高")),"low":_num(getattr(r,'get',lambda *a:0)("最低")),
                 "open":_num(getattr(r,'get',lambda *a:0)("今开")),"prev_close":_num(getattr(r,'get',lambda *a:0)("昨收")),"industry":"",
@@ -307,9 +322,13 @@ class DirectPublicProvider:
                 prev5=float(v.iloc[-6:-1].mean()); return x["code"],(float(v.iloc[-1])/prev5 if prev5>0 else 0.0)
             except Exception:return x["code"],0.0
         vr_map={}
-        if not fast:
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                futs=[ex.submit(vr_work,x) for x in active_stocks[:32]]
+        # EastMoney full snapshot already carries real-time volume ratio.  Historical
+        # K-line enrichment is only needed for missing values and must never delay the
+        # fast dashboard path.
+        missing_vr=[x for x in active_stocks[:24] if not x.get("volume_ratio")]
+        if (not fast) and missing_vr:
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                futs=[ex.submit(vr_work,x) for x in missing_vr]
                 for fut in as_completed(futs):
                     c,v=fut.result(); vr_map[c]=v
             for x in active_stocks:
@@ -340,23 +359,27 @@ class DirectPublicProvider:
         for _,r in rv.iterrows():
             review_universe.append({
                 "code":str(r.get("代码","")).zfill(6),"name":str(r.get("名称","")),"price":round(_num(r.get("最新价")),3),
-                "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":0.0,"turnover_rate":round(_num(r.get("换手率")),2),
+                "pct":round(_num(r.get("涨跌幅")),2),"volume_ratio":round(_num(r.get("量比")),2),"turnover_rate":round(_num(r.get("换手率")),2),
                 "amount":_num(r.get("成交额")),"high":_num(r.get("最高")),"low":_num(r.get("最低")),
                 "open":_num(r.get("今开")),"prev_close":_num(r.get("昨收")),"industry":"",
                 "market_cap":_num(r.get("总市值"))*10000,"float_market_cap":_num(r.get("流通市值"))*10000,
             })
 
         quality = "full" if full_market else "partial"
+        if not full_market:
+            # Never present sample-pool counts as full-market facts.
+            zt_count = dt_count = zb_count = None
+            seal_rate = None
         source_errors=list(meta.get("errors") or [])
         if board_errors: source_errors.append("连板历史部分失败")
-        notice = None if full_market else f"新浪快照仅取得 {len(spot)} / {meta.get('expected') or '?'} 只，市场广度不参与情绪评分；个股候选仍使用真实已取得行情。"
+        notice = None if full_market else f"实时快照仅取得 {len(spot)} / {meta.get('expected') or '?'} 只，市场广度与涨跌停统计标记为不完整；个股候选仍使用真实已取得行情。"
 
         return {
-            "source":"新浪财经实时快照 + 腾讯/新浪K线",
+            "source":f"{meta.get('provider') or '公开实时行情'} + 腾讯/新浪K线",
             "is_live":True,
             "source_errors":source_errors[:20],
             "source_status":{
-                "sina_snapshot":meta,
+                "market_snapshot":meta,
                 "history":"腾讯财经→新浪财经K线回退",
                 "quality":quality,
             },

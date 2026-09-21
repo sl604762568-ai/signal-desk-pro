@@ -39,6 +39,20 @@ QQ_KLINE_HOSTS = [
     "https://ifzq.gtimg.cn/appstock/app/fqkline/get",
 ]
 
+# 东方财富全A快照：优先使用 2026 年 AKShare 已切换的 push2delay 域名，
+# 一次请求拿全市场，避免新浪 70+ 页分页导致慢和统计失真。
+EASTMONEY_SPOT_HOSTS = [
+    "https://82.push2delay.eastmoney.com/api/qt/clist/get",
+    "https://push2delay.eastmoney.com/api/qt/clist/get",
+    "https://82.push2.eastmoney.com/api/qt/clist/get",
+]
+EASTMONEY_HEADERS = {
+    "User-Agent": UA,
+    "Referer": "https://quote.eastmoney.com/center/gridlist.html#hs_a_board",
+    "Accept": "application/json,text/plain,*/*",
+}
+EASTMONEY_TIMEOUT = float(os.getenv("EASTMONEY_TIMEOUT", "5.5"))
+
 _hist_cache: Dict[str, Tuple[float, pd.DataFrame, str]] = {}
 _hist_lock = threading.Lock()
 HISTORY_CACHE_SECONDS = int(os.getenv("HISTORY_CACHE_SECONDS", "300"))
@@ -74,6 +88,72 @@ def _get(url: str, *, params: Optional[Dict[str, Any]] = None, headers: Optional
     r = requests.get(url, params=params, headers=headers or {"User-Agent": UA}, timeout=timeout or HTTP_TIMEOUT)
     r.raise_for_status()
     return r
+
+
+def fetch_eastmoney_all_a() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Fast full-market A-share snapshot from EastMoney.
+
+    Uses one large-page request instead of crawling ~70 Sina pages.  The result
+    is only considered full-market when the returned row count is close to the
+    provider's own total.  On failure callers can fall back to Sina.
+    """
+    started=time.time(); errors=[]
+    params={
+        "pn":"1", "pz":"8000", "po":"1", "np":"1",
+        "ut":"bd1d9ddb04089700cf9c27f6f7426281", "fltt":"2", "invt":"2",
+        "fid":"f3",
+        "fs":"m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048",
+        "fields":"f2,f3,f4,f5,f6,f7,f8,f10,f12,f14,f15,f16,f17,f18,f20,f21",
+    }
+    for url in EASTMONEY_SPOT_HOSTS:
+        try:
+            r=requests.get(url,params=params,headers=EASTMONEY_HEADERS,timeout=EASTMONEY_TIMEOUT)
+            r.raise_for_status(); j=r.json(); data=(j or {}).get("data") or {}
+            raw=data.get("diff") or []
+            if isinstance(raw,dict): raw=list(raw.values())
+            if not isinstance(raw,list) or not raw:
+                errors.append(f"{url}:empty"); continue
+            rows=[]
+            for x in raw:
+                if not isinstance(x,dict): continue
+                cap=_f(x.get("f20")); fcap=_f(x.get("f21"))
+                rows.append({
+                    "code":str(x.get("f12") or "").zfill(6), "name":str(x.get("f14") or ""),
+                    "trade":_f(x.get("f2")), "changepercent":_f(x.get("f3")),
+                    "settlement":_f(x.get("f18")), "open":_f(x.get("f17")),
+                    "high":_f(x.get("f15")), "low":_f(x.get("f16")),
+                    "volume":_f(x.get("f5")), "amount":_f(x.get("f6")),
+                    "turnoverratio":_f(x.get("f8")), "volume_ratio":_f(x.get("f10")),
+                    # provider historically expects Sina's 10k-RMB cap unit and converts back to yuan
+                    "mktcap":cap/10000 if cap else 0.0, "nmc":fcap/10000 if fcap else 0.0,
+                })
+            df=pd.DataFrame(rows)
+            if not df.empty:
+                df=df[df["code"].str.match(r"^\\d{6}$",na=False)].drop_duplicates("code",keep="last")
+            expected=int(data.get("total") or len(df) or 0)
+            coverage=(len(df)/expected) if expected else (1.0 if len(df)>=4500 else 0.0)
+            meta={"provider":"东方财富全A直连","expected":expected,"rows":int(len(df)),
+                  "coverage":round(min(1.0,coverage),3),
+                  "full_market":bool((expected and len(df)>=expected*0.95) or (not expected and len(df)>=4500)),
+                  "errors":errors[:8],"elapsed_ms":int((time.time()-started)*1000),"mode":"one-shot"}
+            if len(df)>=1000:
+                return df,meta
+            errors.append(f"{url}:rows={len(df)}")
+        except Exception as exc:
+            errors.append(f"{url}:{type(exc).__name__}")
+    raise RuntimeError("东方财富全A快照失败: "+" / ".join(errors[:6]))
+
+
+def fetch_full_market_snapshot() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Full-market snapshot with fast provider first and full Sina fallback."""
+    errors=[]
+    try:
+        return fetch_eastmoney_all_a()
+    except Exception as exc:
+        errors.append(f"eastmoney:{type(exc).__name__}")
+    df,meta=fetch_sina_all_a()
+    meta=dict(meta); meta["fallback_errors"]=errors
+    return df,meta
 
 
 def fetch_sina_count(node: str = "hs_a") -> int:
@@ -374,6 +454,7 @@ def probe_sources() -> Dict[str, Any]:
             return name, {"ok": False, "ms": int((time.time()-st)*1000), "error": f"{type(exc).__name__}: {exc}"}
 
     tests = [
+        ("eastmoney_full", lambda: {"rows": len(fetch_eastmoney_all_a()[0]), "meta": fetch_eastmoney_all_a()[1]}),
         ("sina_list", lambda: len(fetch_sina_page(1, sort="amount", asc=0))),
         ("sina_count", lambda: fetch_sina_count("hs_a")),
         ("tencent_kline", lambda: len(fetch_history_df("600519", 20, use_cache=False)[0])),

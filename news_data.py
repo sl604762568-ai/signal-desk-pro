@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 import requests
 
 NEWSNOW_BASE = os.getenv("NEWSNOW_BASE_URL", "https://newsnow.busiyi.world").rstrip("/")
-NEWS_TIMEOUT = float(os.getenv("NEWS_TIMEOUT", "6"))
+NEWS_TIMEOUT = float(os.getenv("NEWS_TIMEOUT", "3.2"))
 
 SOURCES = {
     "cls-hot": "财联社热门",
