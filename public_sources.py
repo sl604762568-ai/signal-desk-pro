@@ -177,6 +177,89 @@ def fetch_sina_all_a() -> Tuple[pd.DataFrame, Dict[str, Any]]:
     return df, meta
 
 
+
+def fetch_sina_fast_snapshot() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Fast partial real snapshot for dashboard/selection.
+
+    Avoids a 70-page full-market crawl on every refresh. It merges several
+    ranked slices (amount/change/turnover) plus a few symbol pages, which is
+    enough for hot-stock screening while being explicitly marked partial.
+    """
+    started=time.time(); errors=[]; expected=0
+    try:
+        expected=fetch_sina_count("hs_a")
+    except Exception as exc:
+        errors.append(f"count:{type(exc).__name__}")
+    jobs=[
+        ("amount",0,list(range(1,9))),
+        ("changepercent",0,list(range(1,7))),
+        ("turnoverratio",0,list(range(1,6))),
+        ("changepercent",1,list(range(1,4))),
+        ("symbol",1,list(range(1,5))),
+    ]
+    rows=[]
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futs={ex.submit(_fetch_pages,pages,sort=sort,asc=asc,workers=5):(sort,asc) for sort,asc,pages in jobs}
+        for fut in as_completed(futs):
+            try:
+                part,errs=fut.result(); rows.extend(part); errors.extend(errs[:4])
+            except Exception as exc:
+                errors.append(f"fast:{type(exc).__name__}")
+    if rows:
+        df=pd.DataFrame(rows)
+        if "code" in df.columns:
+            df["code"]=df["code"].astype(str).str.zfill(6)
+            df=df.drop_duplicates("code",keep="last")
+    else:
+        df=pd.DataFrame()
+    coverage=(len(df)/expected) if expected else 0.0
+    return df,{
+        "provider":"新浪财经直连-快速池","expected":expected,"rows":int(len(df)),
+        "coverage":round(min(1.0,coverage),3),"full_market":False,
+        "errors":errors[:20],"elapsed_ms":int((time.time()-started)*1000),
+        "mode":"fast-partial",
+    }
+
+def fetch_tencent_quotes(codes: List[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Batch real-time quotes for a small watchlist (paper trading).
+
+    Uses Tencent qt.gtimg.cn and intentionally avoids an all-market crawl.
+    """
+    started=time.time(); codes=[str(c).zfill(6) for c in codes if str(c).strip()]
+    codes=list(dict.fromkeys(codes))[:200]
+    if not codes:
+        return [],{"provider":"腾讯财经实时","rows":0,"elapsed_ms":0,"errors":[]}
+    syms=[tencent_symbol(c) for c in codes]
+    url="https://qt.gtimg.cn/q="+",".join(syms)
+    errors=[]; out=[]
+    try:
+        r=_get(url,headers=QQ_HEADERS,timeout=min(5.0,HTTP_TIMEOUT))
+        r.encoding="gbk"
+        text=r.text or ""
+        for line in text.splitlines():
+            if '="' not in line: continue
+            try:
+                payload=line.split('="',1)[1].rsplit('"',1)[0]
+                f=payload.split('~')
+                if len(f)<35: continue
+                code=str(f[2]).zfill(6); price=_f(f[3]); prev=_f(f[4]); op=_f(f[5]);
+                if price<=0: continue
+                pct=_f(f[32], ((price/prev-1)*100 if prev else 0.0))
+                high=_f(f[33],price); low=_f(f[34],price)
+                amount=_f(f[37]) if len(f)>37 else _f(f[7])*10000
+                turnover=_f(f[38]) if len(f)>38 else 0.0
+                volume_ratio=_f(f[49]) if len(f)>49 else 0.0
+                out.append({
+                    "code":code,"name":f[1],"price":price,"pct":pct,"open":op,
+                    "prev_close":prev,"high":high,"low":low,"amount":amount,
+                    "turnover_rate":turnover,"volume_ratio":volume_ratio,"industry":"",
+                })
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+    except Exception as exc:
+        errors.append(f"request:{type(exc).__name__}:{exc}")
+    return out,{"provider":"腾讯财经实时","rows":len(out),"elapsed_ms":int((time.time()-started)*1000),"errors":errors[:10]}
+
 def tencent_symbol(code: str) -> str:
     code = str(code).zfill(6)
     if code.startswith(("6", "9")):

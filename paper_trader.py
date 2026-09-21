@@ -222,11 +222,6 @@ def run_engine(db_path: Path, market: Dict[str, Any]) -> Dict[str, Any]:
             if px<=0: continue
             high=max(float(pos['high_water']),px)
             payload=json.loads(pos['payload'] or '{}')
-            # A股股票按T+1模拟：当日买入仓位当日不可卖出。
-            if str(pos.get('entry_date',''))[:10] == trade_date:
-                conn.execute('UPDATE paper_positions SET high_water=?,last_price=?,last_value=?,updated_at=? WHERE code=?',
-                             (high,px,px*int(pos['qty']),now.isoformat(timespec='seconds'),code))
-                continue
             stop=float(cfg['stop_loss_pct']); take=float(cfg['take_profit_pct']); trail=float(cfg['trailing_stop_pct'])
             reason=None
             if px <= float(pos['avg_cost'])*(1-stop): reason=f'止损 {stop*100:.1f}%'
@@ -252,12 +247,9 @@ def run_engine(db_path: Path, market: Dict[str, Any]) -> Dict[str, Any]:
         positions=[dict(r) for r in conn.execute('SELECT * FROM paper_positions').fetchall()]
         held={p['code'] for p in positions}
 
-        # 2) entries use most recent prior-day selection. 云端自动盘默认只在早盘买入窗口开新仓。
+        # 2) entries use most recent prior-day selection
         signals=latest_signals(db_path,before_date=trade_date)
         slots=max(0,int(cfg['max_positions'])-len(positions))
-        allow_entries=bool(market.get('paper_allow_entries', True))
-        if not allow_entries:
-            slots=0
         for p in signals:
             if slots<=0: break
             code=str(p.get('code','')).zfill(6)
@@ -365,3 +357,122 @@ def has_signals_for(db_path: Path, signal_date: str) -> bool:
     with _conn(db_path) as conn:
         row=conn.execute('SELECT 1 FROM paper_signals WHERE signal_date=? LIMIT 1',(signal_date,)).fetchone()
     return bool(row)
+
+
+def get_watch_codes(db_path: Path, include_signals: bool = True) -> List[str]:
+    """Return the small set of symbols that need real-time paper quotes."""
+    init_paper_db(db_path)
+    codes=[]
+    with _conn(db_path) as conn:
+        rows=conn.execute('SELECT code FROM paper_positions ORDER BY entry_date, code').fetchall()
+        codes.extend(str(r['code']).zfill(6) for r in rows)
+    if include_signals:
+        for p in latest_signals(db_path):
+            c=str(p.get('code','')).zfill(6)
+            if len(c)==6:
+                codes.append(c)
+    return list(dict.fromkeys(codes))[:30]
+
+
+def _record_equity_manual(conn, cash: float, initial: float, realized: float, market: Dict[str, Any], now: datetime) -> None:
+    positions=[dict(r) for r in conn.execute('SELECT * FROM paper_positions').fetchall()]
+    mv=0.0
+    for pos in positions:
+        snap=_find_snapshot(market,pos['code'])
+        px=float((snap or {}).get('price') or pos['last_price'] or 0)
+        mv += px*int(pos['qty'])
+    equity=cash+mv
+    ret=(equity/initial-1)*100 if initial else 0.0
+    conn.execute('UPDATE paper_account SET cash=?,realized_pnl=?,updated_at=? WHERE id=1',
+                 (cash,realized,now.isoformat(timespec='seconds')))
+    conn.execute('INSERT OR REPLACE INTO paper_equity(ts,trade_date,cash,market_value,equity,pnl,return_pct,positions) VALUES(?,?,?,?,?,?,?,?)',
+                 (now.isoformat(timespec='microseconds'),now.date().isoformat(),cash,mv,equity,equity-initial,ret,len(positions)))
+
+
+def manual_buy(db_path: Path, quote: Dict[str, Any], qty: Optional[int] = None, amount: Optional[float] = None) -> Dict[str, Any]:
+    """Paper-only manual buy using a server-fetched live quote."""
+    init_paper_db(db_path); cfg=get_settings(db_path); now=datetime.now(CN_TZ)
+    code=str(quote.get('code','')).zfill(6); name=str(quote.get('name',''))
+    price=float(quote.get('price') or 0)
+    if len(code)!=6 or price<=0:
+        return {'ok':False,'error':'无有效实时报价'}
+    with _conn(db_path) as conn:
+        acc=conn.execute('SELECT * FROM paper_account WHERE id=1').fetchone()
+        cash=float(acc['cash']); initial=float(acc['initial_capital']); realized=float(acc['realized_pnl'])
+        existing=conn.execute('SELECT * FROM paper_positions WHERE code=?',(code,)).fetchone()
+        if not existing:
+            count=conn.execute('SELECT COUNT(*) c FROM paper_positions').fetchone()['c']
+            if int(count)>=int(cfg['max_positions']):
+                return {'ok':False,'error':f'已达到最大持仓数 {int(cfg["max_positions"])}'}
+        fill=price*(1+float(cfg['slippage_rate']))
+        if qty is not None:
+            try: q=int(qty)
+            except Exception: q=0
+            q=(q//100)*100
+        else:
+            budget=min(cash, max(0.0,float(amount or 0)))
+            q=int(math.floor(budget/(fill*100))*100) if budget>0 else 0
+        if q<100:
+            return {'ok':False,'error':'买入数量至少100股；若按金额买入，请提高金额'}
+        gross=fill*q; fees=_commission(gross,cfg,False); total=gross+fees
+        if total>cash:
+            return {'ok':False,'error':f'可用现金不足，预计需要 {total:.2f} 元，当前现金 {cash:.2f} 元'}
+        cash-=total
+        if existing:
+            old_qty=int(existing['qty']); old_cost=float(existing['avg_cost'])*old_qty
+            new_qty=old_qty+q; avg=(old_cost+total)/new_qty
+            payload=existing['payload'] or '{}'
+            high=max(float(existing['high_water']),price)
+            conn.execute('UPDATE paper_positions SET name=?,qty=?,avg_cost=?,last_price=?,last_value=?,high_water=?,updated_at=? WHERE code=?',
+                         (name or existing['name'],new_qty,avg,price,price*new_qty,high,now.isoformat(timespec='seconds'),code))
+        else:
+            payload=json.dumps({'manual':True,'source':'manual'},ensure_ascii=False)
+            conn.execute('INSERT INTO paper_positions(code,name,qty,avg_cost,entry_price,entry_date,signal_date,high_water,last_price,last_value,payload,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (code,name,q,total/q,fill,now.date().isoformat(),None,price,price,price*q,payload,now.isoformat(timespec='seconds')))
+        conn.execute('INSERT INTO paper_trades(ts,trade_date,side,code,name,qty,price,gross,fees,pnl,reason,signal_date,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                     (now.isoformat(timespec='seconds'),now.date().isoformat(),'BUY',code,name,q,fill,gross,fees,None,'手动虚拟买入',None,payload))
+        market={'review_universe':[quote],'active_stocks':[quote]}
+        _record_equity_manual(conn,cash,initial,realized,market,now)
+        conn.commit()
+    return {'ok':True,'action':{'side':'BUY','code':code,'name':name,'qty':q,'price':round(fill,3),'gross':round(gross,2),'fees':round(fees,2),'reason':'手动虚拟买入'}}
+
+
+def manual_sell(db_path: Path, quote: Dict[str, Any], qty: Optional[int] = None, sell_all: bool = False) -> Dict[str, Any]:
+    """Paper-only manual sell. Enforces A-share T+1 for positions bought today."""
+    init_paper_db(db_path); cfg=get_settings(db_path); now=datetime.now(CN_TZ)
+    code=str(quote.get('code','')).zfill(6); price=float(quote.get('price') or 0)
+    if len(code)!=6 or price<=0:
+        return {'ok':False,'error':'无有效实时报价'}
+    with _conn(db_path) as conn:
+        acc=conn.execute('SELECT * FROM paper_account WHERE id=1').fetchone()
+        cash=float(acc['cash']); initial=float(acc['initial_capital']); realized=float(acc['realized_pnl'])
+        pos=conn.execute('SELECT * FROM paper_positions WHERE code=?',(code,)).fetchone()
+        if not pos:
+            return {'ok':False,'error':'虚拟盘没有该股票持仓'}
+        if str(pos['entry_date'])[:10] == now.date().isoformat():
+            return {'ok':False,'error':'按A股T+1模拟：今日买入的仓位今日不可卖出'}
+        held=int(pos['qty'])
+        if sell_all or qty is None:
+            q=held
+        else:
+            try: q=int(qty)
+            except Exception: q=0
+            q=(q//100)*100
+            if q<100:
+                return {'ok':False,'error':'卖出数量至少100股'}
+            q=min(q,held)
+        fill=price*(1-float(cfg['slippage_rate'])); gross=fill*q; fees=_commission(gross,cfg,True)
+        cost=float(pos['avg_cost'])*q; pnl=gross-fees-cost
+        cash += gross-fees; realized += pnl
+        remain=held-q
+        if remain<=0:
+            conn.execute('DELETE FROM paper_positions WHERE code=?',(code,))
+        else:
+            conn.execute('UPDATE paper_positions SET qty=?,last_price=?,last_value=?,updated_at=? WHERE code=?',
+                         (remain,price,price*remain,now.isoformat(timespec='seconds'),code))
+        conn.execute('INSERT INTO paper_trades(ts,trade_date,side,code,name,qty,price,gross,fees,pnl,reason,signal_date,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                     (now.isoformat(timespec='seconds'),now.date().isoformat(),'SELL',code,pos['name'],q,fill,gross,fees,pnl,'手动虚拟卖出',pos['signal_date'],pos['payload']))
+        market={'review_universe':[quote],'active_stocks':[quote]}
+        _record_equity_manual(conn,cash,initial,realized,market,now)
+        conn.commit()
+    return {'ok':True,'action':{'side':'SELL','code':code,'name':pos['name'],'qty':q,'price':round(fill,3),'gross':round(gross,2),'fees':round(fees,2),'pnl':round(pnl,2),'reason':'手动虚拟卖出'}}

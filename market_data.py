@@ -163,11 +163,11 @@ class DirectPublicProvider:
 
     def fetch(self, fast: bool = False) -> Dict[str, Any]:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from public_sources import fetch_sina_all_a, fetch_history_df, limit_pct
+        from public_sources import fetch_sina_all_a, fetch_sina_fast_snapshot, fetch_history_df, limit_pct
 
         now = datetime.now(CN_TZ)
         date = self._latest_trade_date()
-        spot, meta = fetch_sina_all_a()
+        spot, meta = (fetch_sina_fast_snapshot() if fast else fetch_sina_all_a())
         if spot is None or spot.empty or "code" not in spot.columns:
             raise RuntimeError("新浪全A快照无可用数据")
 

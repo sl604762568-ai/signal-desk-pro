@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#080b12"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <link rel="manifest" href="/manifest.webmanifest"/>
-<title>Signal Desk Pro v7.0 · 云端自动虚拟盘×板块复盘×缠论</title>
+<title>Signal Desk Pro v6.9.1 · 手动+自动虚拟盘</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
 :root{--bg:#070a10;--panel:#0d111a;--panel2:#111722;--line:#202938;--line2:#2d394d;--txt:#eef3fb;--muted:#8b98aa;--red:#ff5d65;--green:#2bd78d;--amber:#ffbd4a;--blue:#6ea8ff;--purple:#9b83ff;--cyan:#61d8ff;--shadow:0 18px 45px rgba(0,0,0,.28)}
@@ -25,6 +25,8 @@
 
 <style>
 .sectorGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.sectorCard{border:1px solid #253149;border-radius:13px;background:#0a1019;padding:12px;cursor:pointer;transition:.15s}.sectorCard:hover{border-color:#546b93;transform:translateY(-1px)}.sectorTop{display:flex;justify-content:space-between;gap:8px}.sectorHeat{font-size:24px;font-weight:900;color:#ff8378}.sectorStats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px}.sectorStats div{padding:7px;background:#101724;border-radius:8px;text-align:center}.sectorStats small{display:block;color:#77879d;font-size:9px}.sectorStats b{font-size:11px}.rotationPath{display:flex;gap:6px;align-items:center;overflow:auto;padding-bottom:4px}.rotationDay{min-width:150px;border:1px solid #27344a;background:#0a1019;border-radius:11px;padding:9px}.rotationDay strong{display:block;font-size:12px;margin:3px 0}.rotationDay small{color:#75859c}.rotationArrow{color:#53657f}.sectorMembers{margin-top:10px;display:none}.sectorMembers.show{display:block}.relationTags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.relationTag{border:1px solid #34445f;border-radius:999px;padding:5px 8px;font-size:10px;color:#b8c7dc;background:#0b121d}.relationTag.hot{border-color:#745d50;color:#ffc58d}.tfTabs{display:flex;gap:6px;margin:8px 0 0}.tfTabs button{border:1px solid #2b3850;background:#0b111b;color:#9eacc0;border-radius:8px;padding:6px 9px;font-size:10px;cursor:pointer}.tfTabs button.on{background:#332967;border-color:#6b59cf;color:#fff}.analysisExtra{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.infoList{font-size:11px;line-height:1.7;color:#aab7c8}.infoList b{color:#edf3fb}.trendLegend{display:flex;gap:8px;flex-wrap:wrap;margin-top:5px;font-size:10px;color:#8494a8}.trendLegend i{width:14px;height:2px;display:inline-block;vertical-align:middle;margin-right:4px}.sectorNote{font-size:10px;color:#74849a;line-height:1.6}.memberTitle{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:8px}.memberTable tr{cursor:pointer}.memberTable tr:hover{background:#111927}@media(max-width:900px){.sectorGrid{grid-template-columns:repeat(2,1fr)}.analysisExtra{grid-template-columns:1fr}}@media(max-width:560px){.sectorGrid{grid-template-columns:1fr}.rotationDay{min-width:135px}}
+
+.manualTrade{display:grid;grid-template-columns:1.1fr .9fr;gap:12px}.manualForm{display:grid;grid-template-columns:1fr 1fr;gap:8px}.manualForm label{font-size:10px;color:var(--muted);display:grid;gap:5px}.manualForm input{width:100%;background:#09101a;border:1px solid #28354a;border-radius:9px;color:#edf3fb;padding:9px 10px}.manualQuote{border:1px solid #263248;background:#09101a;border-radius:12px;padding:12px;min-height:104px}.manualQuote b{font-size:18px}.tradeBtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.btn.buy{background:#6d2630;border-color:#8f3541;color:#fff}.btn.sell{background:#124936;border-color:#1d6a4f;color:#fff}.miniBtn{padding:5px 7px;font-size:10px;border-radius:7px}@media(max-width:760px){.manualTrade{grid-template-columns:1fr}.manualForm{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -86,7 +88,7 @@
 </section>
 
 
-<section class="section" id="paper"><div class="secHead"><div><h2>虚拟盘 · 自动纸面交易与周期回测</h2><p>以网站每日“次日5股”为信号源，结合实时行情自动模拟买卖；默认本金 ¥10,000，可调整。只做虚拟成交，不连接任何券商。</p></div><div class="paperActions"><button class="btn" onclick="syncPaperPicks()">同步今日5股</button><button class="btn primary" id="paperRunBtn" onclick="runPaperEngine(false)">▶ 执行一次</button></div></div>
+<section class="section" id="paper"><div class="secHead"><div><h2>虚拟盘 · 手动 + 自动纸面交易与周期回测</h2><p>支持手动虚拟买卖，也可用每日“次日5股”自动模拟；虚拟盘实时价格直接读取腾讯少量股票行情，不依赖全A刷新。默认本金 ¥10,000，可调整。</p></div><div class="paperActions"><button class="btn" onclick="syncPaperPicks()">同步今日5股</button><button class="btn primary" id="paperRunBtn" onclick="runPaperEngine(false)">▶ 执行一次</button></div></div>
 <div class="paperStats" id="paperStats">
   <div class="paperStat"><small>总资产</small><b id="paperEquity">--</b><span id="paperRet">--</span></div>
   <div class="paperStat"><small>可用现金</small><b id="paperCash">--</b><span>按100股一手</span></div>
@@ -104,11 +106,12 @@
     <label>最长持仓天数<input id="paperDays" type="number" min="1" max="30" step="1" value="5"><span>天</span></label>
     <label>最低候选分<input id="paperMinScore" type="number" min="0" max="100" step="1" value="65"></label>
     <label class="paperToggle"><input id="paperAuto" type="checkbox" checked> 自动虚拟交易</label>
-  </div><div class="paperBtnRow"><button class="btn primary" onclick="savePaperSettings()">保存设置</button><button class="btn" onclick="resetPaper()">重置模拟盘</button></div><div class="paperHint" id="paperHint">云端常驻模式：手机和电脑都可关闭。服务器盘中约每60秒主动刷新行情；09:35-10:45按次日5股与实时条件模拟开仓，交易时段持续执行止损/止盈/移动止盈；收盘后自动保存下一交易日信号。</div></div>
+  </div><div class="paperBtnRow"><button class="btn primary" onclick="savePaperSettings()">保存设置</button><button class="btn" onclick="resetPaper()">重置模拟盘</button></div><div class="paperHint" id="paperHint">自动模式：收盘后保存“次日5股”，下一交易日按实时条件决定是否虚拟买入；持仓按止损/止盈/移动止盈/关键位自动卖出。免费 Render 休眠时后台不会持续运行，网页打开后会继续自动检查。</div></div>
   <div class="panel pad c8"><div class="paperChartHead"><div><div class="eyebrow">FORWARD TEST EQUITY</div><h3 style="margin:4px 0 0;font-size:14px">虚拟净值曲线</h3></div><select id="paperPerfDays" onchange="loadPaperPerformance()"><option value="7">7天</option><option value="30" selected>30天</option><option value="90">90天</option><option value="180">180天</option></select></div><div id="paperChart" class="paperChart"></div><div class="paperPerf" id="paperPerf"><span>收益率 --</span><span>最大回撤 --</span><span>胜率 --</span><span>盈亏比 --</span></div></div>
 </div>
+<div class="panel pad" style="margin-top:10px"><div class="secHead"><div><h2 style="font-size:13px">手动虚拟交易</h2><p>服务器直接读取腾讯实时行情；买卖只记入虚拟账户，不连接券商。买入按100股一手，卖出按A股T+1模拟。</p></div><span class="label" id="paperQuoteSource">实时源：--</span></div><div class="manualTrade"><div><div class="manualForm"><label>股票代码<input id="manualCode" maxlength="6" inputmode="numeric" placeholder="例如 600487"></label><label>按金额买入<input id="manualAmount" type="number" min="1000" step="100" value="3000"></label><label>指定股数（可留空）<input id="manualQty" type="number" min="100" step="100" placeholder="100股一手"></label><label>实时价格<input id="manualPrice" readonly placeholder="先查询实时价"></label></div><div class="tradeBtns"><button class="btn" onclick="queryPaperQuote()">查询实时价</button><button class="btn buy" onclick="manualPaperBuy()">虚拟买入</button></div></div><div class="manualQuote" id="manualQuoteBox"><span class="label">输入6位股票代码后查询。手动买入与自动策略共用同一本金、持仓和净值曲线。</span></div></div></div>
 <div class="grid" style="margin-top:10px">
-  <div class="panel pad c7"><div class="secHead"><div><h2 style="font-size:13px">当前虚拟持仓</h2><p>实时价格只用于纸面估值；没有真实委托。</p></div></div><div class="tableWrap"><table class="tbl"><thead><tr><th>股票</th><th>数量</th><th>成本</th><th>现价</th><th>收益</th><th>市值</th><th>信号日</th></tr></thead><tbody id="paperPositions"><tr><td colspan="7" class="label">暂无持仓</td></tr></tbody></table></div></div>
+  <div class="panel pad c7"><div class="secHead"><div><h2 style="font-size:13px">当前虚拟持仓</h2><p>实时价格只用于纸面估值；没有真实委托。</p></div></div><div class="tableWrap"><table class="tbl"><thead><tr><th>股票</th><th>数量</th><th>成本</th><th>现价</th><th>收益</th><th>市值</th><th>信号日</th><th>操作</th></tr></thead><tbody id="paperPositions"><tr><td colspan="8" class="label">暂无持仓</td></tr></tbody></table></div></div>
   <div class="panel pad c5"><div class="secHead"><div><h2 style="font-size:13px">最近虚拟成交</h2><p>包含手续费、卖出印花税和模拟滑点。</p></div></div><div class="paperTrades" id="paperTrades"><div class="label">暂无成交</div></div></div>
 </div>
 </section>
@@ -142,7 +145,7 @@
 <script>
 const STAGES=['冰点','修复','升温','主升','高潮','强高潮','分歧','退潮','过热'];
 let demoMode=false, dashboard=null, charts={}, analysisData=null, analysisTf='daily';
-console.info('Signal Desk Pro frontend v7.0-cloud-paper');
+console.info('Signal Desk Pro frontend v6.9.1-manual-paper');
 const $=id=>document.getElementById(id);
 const num=(v,d=0)=>Number.isFinite(Number(v))?Number(v):d;
 const fmtPct=v=>`${num(v)>=0?'+':''}${num(v).toFixed(2)}%`;
@@ -211,19 +214,35 @@ function renderPaper(d){
   $('paperRet').className=num(d.return_pct)>=0?'red':'green';
   $('paperPosCount').textContent=`${(d.positions||[]).length} / ${d.settings?.max_positions||3} 仓`;
   $('paperWin').textContent=d.win_rate==null?`已平仓 ${d.closed_trades||0} 笔`:`胜率 ${num(d.win_rate).toFixed(1)}% · ${d.closed_trades||0} 笔`;
-  fillPaperSettings(d.settings||{});
+  fillPaperSettings(d.settings||{});if($('paperQuoteSource'))$('paperQuoteSource').textContent=d.quote_source?`实时源：${d.quote_source}${d.quote_updated_at?' · '+d.quote_updated_at.slice(11,19):''}`:'实时源：腾讯财经（无持仓时不请求）';
   let ps=d.positions||[];
-  $('paperPositions').innerHTML=ps.length?ps.map(x=>`<tr class="clickable" onclick="analyzeStock('${esc(x.code)}','${esc(x.name)}')"><td><b>${esc(x.name)}</b><div class="subtle">${esc(x.code)}</div></td><td>${x.qty}</td><td>${cashFmt(x.avg_cost)}</td><td>${cashFmt(x.current_price)}</td><td class="${num(x.return_pct)>=0?'red':'green'}">${num(x.return_pct)>=0?'+':''}${num(x.return_pct).toFixed(2)}%<div class="subtle">${cashFmt(x.unrealized_pnl)}</div></td><td>${cashFmt(x.market_value)}</td><td>${esc(x.signal_date||'--')}</td></tr>`).join(''):'<tr><td colspan="7" class="label">暂无虚拟持仓。收盘后先同步“次日5股”，下一交易日满足实时条件后才会模拟买入。</td></tr>';
+  $('paperPositions').innerHTML=ps.length?ps.map(x=>`<tr class="clickable" onclick="analyzeStock('${esc(x.code)}','${esc(x.name)}')"><td><b>${esc(x.name)}</b><div class="subtle">${esc(x.code)}</div></td><td>${x.qty}</td><td>${cashFmt(x.avg_cost)}</td><td>${cashFmt(x.current_price)}</td><td class="${num(x.return_pct)>=0?'red':'green'}">${num(x.return_pct)>=0?'+':''}${num(x.return_pct).toFixed(2)}%<div class="subtle">${cashFmt(x.unrealized_pnl)}</div></td><td>${cashFmt(x.market_value)}</td><td>${esc(x.signal_date||'手动')}</td><td><div style="display:flex;gap:5px">${x.qty>=200?`<button class="btn miniBtn sell" onclick="event.stopPropagation();manualPaperSell('${esc(x.code)}',Math.floor(${x.qty}/200)*100,false)">卖一半</button>`:''}<button class="btn miniBtn sell" onclick="event.stopPropagation();manualPaperSell('${esc(x.code)}',null,true)">全部卖</button></div></td></tr>`).join(''):'<tr><td colspan="8" class="label">暂无虚拟持仓。可手动买入，或收盘后同步“次日5股”等待自动策略。</td></tr>';
   let tr=d.trades||[];
   $('paperTrades').innerHTML=tr.length?tr.slice(0,20).map(x=>`<div class="paperTrade"><b class="${x.side==='BUY'?'buy':'sell'}">${x.side==='BUY'?'买入':'卖出'} ${esc(x.name)} ${esc(x.code)}</b><br>${x.qty}股 × ${cashFmt(x.price)} · 费用 ${cashFmt(x.fees)}${x.pnl==null?'':` · 盈亏 <span class="${num(x.pnl)>=0?'red':'green'}">${cashFmt(x.pnl)}</span>`}<br><span class="subtle">${esc(x.trade_date)} · ${esc(x.reason||'')}</span></div>`).join(''):'<div class="label">暂无成交记录</div>';
 }
 async function loadPaper(){
-  try{
-    let [r,dr]=await Promise.all([fetch('/api/paper',{cache:'no-store'}),fetch('/api/paper/daemon',{cache:'no-store'})]);
-    let d=await r.json();let dd=await dr.json();renderPaper(d);await loadPaperPerformance();
-    if(dd.ok){let st=dd.market_refresh||{};$('paperHint').textContent=`云端自动盘：${d.settings?.auto_enabled?'已启用':'已关闭'} · 行情进程 ${st.state||'--'} · ${dd.trade_session?'交易时段':'非交易时段'} · 手机/电脑无需在线 · 数据持久化 ${dd.storage||'--'}`;}
-  }catch(e){$('paperHint').textContent='虚拟盘接口暂不可用：'+e.message}
+  try{let r=await fetch('/api/paper',{cache:'no-store'});let d=await r.json();renderPaper(d);await loadPaperPerformance()}catch(e){$('paperHint').textContent='虚拟盘接口暂不可用：'+e.message}
 }
+let manualQuote=null;
+async function queryPaperQuote(){
+  const code=String($('manualCode').value||'').replace(/\D/g,'').padStart(6,'0').slice(-6);
+  if(!/^\d{6}$/.test(code)){$('manualQuoteBox').innerHTML='<span class="amber">请输入6位股票代码</span>';return null}
+  $('manualQuoteBox').innerHTML='<span class="label">正在读取腾讯实时行情…</span>';
+  try{let r=await fetch(`/api/paper/quote/${code}?t=${Date.now()}`,{cache:'no-store'});let d=await r.json();if(!d.ok){$('manualQuoteBox').innerHTML=`<span class="amber">${esc(d.error||'报价失败')}</span>`;return null}manualQuote=d.quote;$('manualPrice').value='¥'+num(d.quote.price).toFixed(2);$('paperQuoteSource').textContent=`实时源：${esc(d.source||'腾讯财经')} · ${esc((d.updated_at||'').slice(11,19))}`;$('manualQuoteBox').innerHTML=`<b>${esc(d.quote.name||code)} <span class="subtle">${esc(code)}</span></b><div style="margin-top:7px">现价 <b>${cashFmt(d.quote.price)}</b> · <span class="${num(d.quote.pct)>=0?'red':'green'}">${fmtPct(d.quote.pct)}</span></div><div class="subtle" style="margin-top:5px">今开 ${num(d.quote.open).toFixed(2)} · 高 ${num(d.quote.high).toFixed(2)} · 低 ${num(d.quote.low).toFixed(2)} · 换手 ${num(d.quote.turnover_rate).toFixed(2)}%</div>`;return d.quote}catch(e){$('manualQuoteBox').innerHTML=`<span class="amber">实时行情请求失败：${esc(e.message)}</span>`;return null}
+}
+async function manualPaperBuy(){
+  const q=manualQuote||await queryPaperQuote();if(!q)return;
+  const qtyRaw=parseInt($('manualQty').value||'0');const amount=num($('manualAmount').value,0);
+  const body={code:q.code,amount:amount};if(qtyRaw>=100)body.qty=qtyRaw;
+  if(!body.qty&&amount<1000){$('manualQuoteBox').innerHTML+='<div class="amber" style="margin-top:6px">按金额买入至少填写1000元，或直接指定100股以上。</div>';return}
+  if(!confirm(`确认以最新实时报价模拟买入 ${q.name||q.code}？\n这不会产生真实证券委托。`))return;
+  try{let r=await fetch('/api/paper/manual-buy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let d=await r.json();if(!d.ok){$('paperHint').textContent=d.error||'手动买入失败';return}$('paperHint').textContent=`手动虚拟买入成功：${d.action.name||d.action.code} ${d.action.qty}股 @ ${cashFmt(d.action.price)}，费用 ${cashFmt(d.action.fees)}`;renderPaper(d.portfolio);loadPaperPerformance()}catch(e){$('paperHint').textContent='手动买入失败：'+e.message}
+}
+async function manualPaperSell(code,qty=null,all=false){
+  const txt=all?'全部卖出':`卖出 ${qty||''} 股`;if(!confirm(`确认${txt} ${code} 的虚拟持仓？\n按A股T+1规则，今日新买仓位不可卖。`))return;
+  try{let r=await fetch('/api/paper/manual-sell',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,qty,all})});let d=await r.json();if(!d.ok){$('paperHint').textContent=d.error||'手动卖出失败';return}$('paperHint').textContent=`手动虚拟卖出：${d.action.name||d.action.code} ${d.action.qty}股 @ ${cashFmt(d.action.price)}，本笔盈亏 ${cashFmt(d.action.pnl)}`;renderPaper(d.portfolio);loadPaperPerformance()}catch(e){$('paperHint').textContent='手动卖出失败：'+e.message}
+}
+
 async function savePaperSettings(){
   const body={initial_capital:Math.max(10000,num($('paperCapital').value,10000)),max_positions:parseInt($('paperMaxPos').value||3),position_pct:num($('paperPosPct').value,33)/100,stop_loss_pct:num($('paperStop').value,5)/100,take_profit_pct:num($('paperTake').value,8)/100,trailing_stop_pct:num($('paperTrail').value,4)/100,max_hold_days:parseInt($('paperDays').value||5),min_pick_score:num($('paperMinScore').value,65),auto_enabled:$('paperAuto').checked};
   let r=await fetch('/api/paper/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let d=await r.json();if(d.ok){fillPaperSettings(d.settings);$('paperHint').textContent='设置已保存。修改初始本金不会自动重置已有账户；若要从新本金重新开始，请点击“重置模拟盘”。'}
@@ -288,6 +307,6 @@ async function loadDashboard(fresh=false){
 function toggleDemo(){demoMode=!demoMode;$('demoBtn').textContent=demoMode?'真实':'演示';loadDashboard(true)}
 function closeModal(){$('modal').classList.remove('show')}
 async function openStock(code,name){$('modal').classList.add('show');$('modalTitle').textContent=`${name} ${code}`;$('modalSub').textContent='正在加载近70个交易日K线…';if(charts.k){charts.k.dispose();charts.k=null}charts.k=echarts.init($('kchart'));charts.k.showLoading({color:'#8b76ff',textColor:'#8797ad',maskColor:'rgba(10,15,23,.5)'});try{let r=await fetch(`/api/stock/${code}`);let d=await r.json();charts.k.hideLoading();if(!d.rows?.length){$('modalSub').textContent=d.error||'暂无K线数据';return}let rows=d.rows;let dates=rows.map(x=>x.date),ohlc=rows.map(x=>[x.open,x.close,x.low,x.high]),vol=rows.map(x=>x.volume);$('modalSub').textContent='近70个交易日 · 前复权 · 点击候选仅用于量价核验';charts.k.setOption({animation:false,axisPointer:{link:[{xAxisIndex:'all'}]},tooltip:{trigger:'axis'},grid:[{left:48,right:14,top:25,height:'62%'},{left:48,right:14,top:'72%',height:'17%'}],xAxis:[{type:'category',data:dates,boundaryGap:true,axisLabel:{color:'#74849a',fontSize:9},axisLine:{lineStyle:{color:'#263249'}},min:'dataMin',max:'dataMax'},{type:'category',gridIndex:1,data:dates,axisLabel:{show:false},axisLine:{lineStyle:{color:'#263249'}},axisTick:{show:false}}],yAxis:[{scale:true,axisLabel:{color:'#74849a',fontSize:9},splitLine:{lineStyle:{color:'#1c2635'}}},{gridIndex:1,scale:true,axisLabel:{color:'#74849a',fontSize:9},splitLine:{show:false}}],dataZoom:[{type:'inside',xAxisIndex:[0,1],start:25,end:100}],series:[{name:'K',type:'candlestick',data:ohlc,itemStyle:{color:'#ff5d65',color0:'#2bd78d',borderColor:'#ff5d65',borderColor0:'#2bd78d'}},{name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,data:vol,itemStyle:{color:'#526987'}}]})}catch(e){charts.k.hideLoading();$('modalSub').textContent='K线接口暂不可用'}setTimeout(()=>charts.k&&charts.k.resize(),50)}
-initCharts();loadDashboard();setTimeout(()=>loadSectorReview(false),1800);setTimeout(()=>loadPaper(),2300);setInterval(()=>{if(!demoMode)loadDashboard(false)},90000);if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+initCharts();loadDashboard();setTimeout(()=>loadSectorReview(false),1800);setTimeout(()=>loadPaper(),2300);setInterval(()=>{if(!demoMode)loadDashboard(false)},90000);setInterval(()=>{if($('paperAuto')?.checked)runPaperEngine(true)},60000);if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 </body></html>
