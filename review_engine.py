@@ -352,7 +352,7 @@ def build_close_review() -> Dict[str, Any]:
     source_status={}
 
     # Parallel current-day sources.
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         fut_em=ex.submit(_safe_call,lk,'stock_zt_pool_em')
         fut_dt=ex.submit(_safe_call,lk,'stock_dt_pool_em')
         fut_cls=ex.submit(_safe_call,lk,'stock_zt_pool_cls')

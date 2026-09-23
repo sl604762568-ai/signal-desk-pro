@@ -1,1 +1,10 @@
-
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.db
+.env
+.venv
+venv
+README_LOCAL.md

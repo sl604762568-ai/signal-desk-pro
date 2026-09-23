@@ -43,7 +43,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.11-auction-watchlist")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.11.1-nonblocking-review")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -390,19 +390,58 @@ def dashboard(mode: str=Query("auto",pattern="^(auto|demo)$"), fresh: bool=False
 
 
 
+# 收盘复盘不再在 HTTP 请求线程里等待多路公开数据。
+# 同时最多允许一次采集；若某个外部源永久无响应，请求仍然可以快速返回。
 _close_review_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+_close_review_state: Dict[str, Any] = {"started": 0.0, "running": False, "error": None, "attempt": 0}
+_close_review_lock = threading.RLock()
+CLOSE_REVIEW_BUDGET = max(10, min(120, int(os.getenv("CLOSE_REVIEW_BUDGET", "35"))))
+
+
+def _close_review_worker() -> None:
+    result = None
+    try:
+        result = build_close_review()
+        if not isinstance(result, dict):
+            result = {"ok": False, "error": "收盘复盘返回格式异常"}
+    except Exception as exc:
+        result = {"ok": False, "verified": False,
+                  "error": f"收盘复盘采集异常：{type(exc).__name__}: {exc}"}
+    finally:
+        with _close_review_lock:
+            _close_review_cache.update({"ts": time.time(), "data": result})
+            _close_review_state.update({"running": False,
+                                        "error": result.get("error") if result else "empty result"})
+
 
 @app.get("/api/close-review")
-def close_review(fresh: bool=False):
-    now=time.time()
-    if (not fresh) and _close_review_cache.get("data") and now-float(_close_review_cache.get("ts") or 0)<90:
-        return JSONResponse(_close_review_cache["data"])
-    try:
-        data=build_close_review()
-    except Exception as exc:
-        data={"ok":False,"verified":False,"error":f"收盘复盘数据失败：{type(exc).__name__}: {exc}"}
-    _close_review_cache.update({"ts":now,"data":data})
-    return JSONResponse(data)
+def close_review(fresh: bool = False):
+    now = time.time()
+    with _close_review_lock:
+        data = _close_review_cache.get("data")
+        age = now - float(_close_review_cache.get("ts") or 0)
+        is_running = bool(_close_review_state.get("running"))
+        running_age = now - float(_close_review_state.get("started") or now)
+        if data is not None and not fresh and age < 180:
+            return JSONResponse({**data, "cache_age_seconds": round(age, 1)})
+        if is_running:
+            if running_age >= CLOSE_REVIEW_BUDGET:
+                # 不伪造涨跌停数字，也不启动第二轮重型采集。
+                return JSONResponse({"ok": False, "loading": False, "state": "source_timeout",
+                    "error": "公开复盘数据源超时；后台仍在等待该源。不会发布未校验数字。",
+                    "elapsed_seconds": round(running_age, 1)})
+            return JSONResponse({"ok": False, "loading": True, "state": "collecting",
+                                 "elapsed_seconds": round(running_age, 1)})
+        # 失败后短暂冷却，避免多个手机/页面并发打爆免费实例。
+        if data is not None and age < 25:
+            return JSONResponse({**data, "cache_age_seconds": round(age, 1)})
+        _close_review_state.update({"running": True, "started": now,
+                                   "error": None, "attempt": _close_review_state["attempt"] + 1})
+        threading.Thread(target=_close_review_worker, daemon=True,
+                         name="close-review-collector").start()
+    return JSONResponse({"ok": False, "loading": True, "state": "collecting",
+                         "elapsed_seconds": 0})
+
 
 @app.get("/api/review-picks")
 def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
@@ -901,9 +940,10 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.11-auction-watchlist",
+        "version": "6.11.1-nonblocking-review",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
         "refresh": _refresh_meta(),
+        "close_review": {"running": bool(_close_review_state["running"]), "last_error": _close_review_state["error"], "attempt": _close_review_state["attempt"], "has_cache": _close_review_cache["data"] is not None},
     }

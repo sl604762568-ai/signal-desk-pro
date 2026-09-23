@@ -46,7 +46,7 @@ def run():
             assert a['since_added_pct']==0
             print('PASS watchlist records actual supplied quote and explanatory research score')
         client=TestClient(server.app)
-        r=client.get('/api/health');assert r.status_code==200 and r.json()['version']=='6.11-auction-watchlist'
+        r=client.get('/api/health');assert r.status_code==200 and r.json()['version']=='6.11.1-nonblocking-review'
         assert client.get('/api/auction25').json()['total']==0
         assert client.get('/api/auction25/topics').json()['topics']==[]
         assert client.get('/api/auction25/backtest').json()['signal_count']==0
