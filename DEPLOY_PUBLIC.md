@@ -1,47 +1,9 @@
-# v6.4 覆盖部署（你现在已有 Render 服务）
+# v6.11 一次升级到你现有的网站
 
-你不需要重新创建 GitHub 仓库，也不需要重新创建 Render。
+1. 把 ZIP **解压**，进入包含 `app.py`、`Dockerfile`、`render.yaml` 和 `static/` 的文件夹。
+2. 打开原有 GitHub `sl604762568-ai/signal-desk-pro`，选择 `Add file` → `Upload files`，把**文件夹里的全部文件**拖进去，同名文件直接更新，然后 `Commit changes`。
+3. Render → `signal-desk-pro` → Environment：如需添加自选、手动竞价捕获或完整历史股性扫描，设置一个**自己生成的、16位以上**的 `CONTROL_TOKEN`。不要将其发给任何人；只读功能无须设置。
+4. Render → Deploys，等待最新提交变成 `Live`；访问 `https://signal-desk-pro.onrender.com/api/health`，确认版本 `6.11-auction-watchlist`。
+5. 强制刷新手机/电脑网站。上方菜单应按“收盘复盘、龙虎榜、09:25竞价、明日五股、自选股、单股分析……自动回测”排列。
 
-1. 解压 `signal_desk_pro_v6_4_direct.zip`。
-2. 打开 GitHub：`sl604762568-ai / signal-desk-pro`。
-3. 点击 `Add file` → `Upload files`。
-4. 把解压后文件夹**里面的所有文件和文件夹**拖进去（不是上传 ZIP）。
-5. 页面底部点击 `Commit changes`。
-6. Render 会自动部署；等状态变成 `Live`。
-
-## 第一个检查
-
-打开：
-
-`https://signal-desk-pro.onrender.com/api/health`
-
-应看到：
-
-`"version":"6.4-direct-public"`
-
-## 第二个检查（最重要）
-
-打开：
-
-`https://signal-desk-pro.onrender.com/api/sources`
-
-这个页面会直接告诉你三个源：
-
-- `sina_list`：新浪行情列表
-- `sina_count`：新浪 A 股数量
-- `tencent_kline`：腾讯日 K
-
-如果至少新浪列表和腾讯 K 线为 `ok:true`，网站就具备真实个股行情和历史结构分析能力。
-
-## 第三个检查
-
-打开 `/api/dashboard`。它不会再同步等待外部源；冷启动时先返回结构/缓存，然后后台刷新。网页会自动轮询。
-
-如果首页仍显示旧界面，请按 `Ctrl+F5` 强制刷新一次。v6.4 已升级 Service Worker 并自动删除旧缓存。
-
-
-## v6.8 部署后检查
-
-- `/api/health` 应显示 `6.8-sector-rotation`。
-- `/api/sector-review` 应返回 `sectors` 与 `rotation`。
-- 点击任意板块后 `/api/sector/BKxxxx` 应返回真实成分股。
+**注意：保持 Render 免费版意味着既不能保证9:25自动采集成功，也无法保证 SQLite 中的冻结选股、自选、历史竞价和虚拟盘在实例重启/新部署后不丢失。** 如要求全天候无人值守或长期历史研究，后续必须使用常驻实例与外部持久数据库。本版不自动连接 Supabase，也不收取费用。

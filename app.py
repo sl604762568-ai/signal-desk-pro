@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 from pydantic import BaseModel
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Header, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
@@ -28,6 +28,9 @@ from stock_analysis import analyze_stock
 from nextday_selector import build_next5
 from sector_engine import build_sector_review, fetch_board_members, sector_context_for_stock
 from review_engine import build_close_review
+from v611_features import (init as init_v611, freeze_get, freeze_put, freeze_latest, watch_add, watch_list, watch_remove, auction_capture, record_daily_close, auction_view, tech_start, tech_results, tech_start_from_source, now as now_cn)
+from v611_dragon import fetch_dragons
+from v611_auction_analysis import init as init_auction_topics, build_topics, get_topics, replay_real_archive
 from paper_trader import (init_paper_db, get_settings as get_paper_settings, save_settings as save_paper_settings,
                           reset_account as reset_paper_account, store_signals as store_paper_signals,
                           has_signals_for, run_engine as run_paper_engine, get_portfolio as get_paper_portfolio,
@@ -40,10 +43,15 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.10-review-first")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.11-auction-watchlist")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
+_dragon_cache: Dict[str, Any] = {}
+_sector_last: Dict[str,Any]={'data':None,'ts':0}
+_sector_lock=threading.RLock()
+from concurrent.futures import ThreadPoolExecutor
+_sector_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='board-review')
 _lock = threading.Lock()
 
 # 真实行情不再占用 HTTP 请求线程。后台独立进程最多运行 LIVE_REFRESH_TIMEOUT 秒；
@@ -72,6 +80,8 @@ async def public_headers(request: Request, call_next):
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    init_v611()
+    init_auction_topics()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS daily_snapshots(
             trade_date TEXT PRIMARY KEY, captured_at TEXT NOT NULL, score REAL NOT NULL,
@@ -134,8 +144,13 @@ def build_dashboard(force_demo: bool=False, fast_live: bool=False) -> Dict[str, 
         market=provider.fetch()
         news=demo_news_radar()
         hotspot={"url":os.getenv("HOTSPOT_DESK_URL","https://hotspot-link-desk.sl604762568.chatgpt.site"),"signals":[],"candidates":[],"error":"演示模式未抓取外部热点链路"}
+    elif fast_live:
+        market=provider.fetch(fast=True)
+        news={'items':[],'clusters':[],'source_counts':{},'errors':[],'elapsed_ms':0}
+        hotspot={'url':os.getenv('HOTSPOT_DESK_URL','https://hotspot-link-desk.sl604762568.chatgpt.site'),
+                 'signals':[],'candidates':[],'error':None}
     else:
-        # Three independent networks run in parallel; news/hotspot can never delay market serially.
+        # Deep news/hotspot gathering belongs to on-demand endpoints only.
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=3) as ex:
             fm=ex.submit(provider.fetch, fast=fast_live)
@@ -295,6 +310,24 @@ def _paper_background_loop():
             pass
         time.sleep(60)
 
+def _auction_heartbeat():
+    """Best-effort capture while instance is awake; no guarantee on Render Free suspension."""
+    last=None
+    last_close=None
+    while True:
+        t=now_cn()
+        day=t.date().isoformat()
+        if t.weekday()<5 and t.hour==9 and t.minute==25 and day!=last:
+            outcome=auction_capture()
+            if outcome.get('ok'):
+                last=day
+                try:build_topics(day,news=_news_api_cache.get('data') or {'items':[]},max_stocks=80)
+                except Exception:pass
+        if t.weekday()<5 and t.hour==15 and 5<=t.minute<=29 and day!=last_close:
+            close_result=record_daily_close()
+            if close_result.get('ok'):last_close=day
+        time.sleep(8 if t.hour==9 and 23<=t.minute<=26 else 60)
+
 @app.on_event("startup")
 def _startup():
     init_db()
@@ -303,6 +336,7 @@ def _startup():
     if not _paper_loop_started:
         _paper_loop_started = True
         threading.Thread(target=_paper_background_loop, daemon=True, name="paper-trading-loop").start()
+    threading.Thread(target=_auction_heartbeat,daemon=True,name='auction-925-heartbeat').start()
 
 @app.get("/")
 def index(): return FileResponse(STATIC/"index.html")
@@ -372,6 +406,12 @@ def close_review(fresh: bool=False):
 
 @app.get("/api/review-picks")
 def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
+    today=now_cn().date().isoformat()
+    frozen=freeze_get(today,'review')
+    if frozen and mode!='demo':return JSONResponse(frozen)
+    if mode!='demo' and now_cn().hour<15:
+        archived=freeze_latest('review',today)
+        if archived:return JSONResponse({**archived,'note':'显示最近一次真实收盘固定复盘，盘中刷新不重新选股'})
     if mode == "demo":
         return JSONResponse({"regime": {"level":"--","score":0,"note":"演示模式不输出虚构复盘个股"}, "picks":[], "chan_picks":[], "scanned":0, "error":"请切换实时模式后执行复盘。"})
     _harvest_refresh()
@@ -381,8 +421,12 @@ def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Que
         return JSONResponse({"regime": {"level":"--","score":0,"note":"真实行情正在后台刷新"}, "picks":[], "chan_picks":[], "scanned":0, "error":"真实行情尚未准备好，请等待数据源状态变为实时后再点一次。"})
     try:
         from public_sources import fetch_history_df
-        result=build_review_picks(data, data.get("news") or {}, history_fetcher=fetch_history_df, limit=limit)
+        news=_get_cached_news()
+        result=build_review_picks(data, news, history_fetcher=fetch_history_df, limit=limit)
         result["trade_date"]=data.get("trade_date")
+        if now_cn().hour>=15 and str(data.get('trade_date') or '').replace('-','')[:8]==today.replace('-',''):
+            freeze_put(today,'review',result)
+            result=freeze_get(today,'review') or result
         result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
         return JSONResponse(result)
     except Exception as exc:
@@ -405,6 +449,12 @@ def stock_detail(code: str):
 
 @app.get("/api/next5")
 def next5():
+    today=now_cn().date().isoformat()
+    frozen=freeze_get(today,'next5')
+    if frozen:return JSONResponse(frozen)
+    if now_cn().hour<15:
+        archived=freeze_latest('next5',today)
+        if archived:return JSONResponse({**archived,'note':'显示最近收盘固定的次日五股，盘中刷新不改变名单'})
     _harvest_refresh()
     data=_live_cache.get("data")
     if not data:
@@ -412,9 +462,15 @@ def next5():
         return JSONResponse({"environment":{},"picks":[],"scanned":0,"error":"真实行情尚未准备好，请稍后再试。"})
     try:
         from public_sources import fetch_history_df
-        result=build_next5(data, data.get("news") or {}, fetch_history_df, limit=5)
+        news=_get_cached_news()
+        result=build_next5(data, news, fetch_history_df, limit=5)
         result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
-        now_cn=datetime.now(CN_TZ)
+        result["trade_date"]=data.get('trade_date')
+        current_cn=datetime.now(CN_TZ)
+        if current_cn.hour>=15 and str(data.get('trade_date') or '').replace('-','')[:8]==today.replace('-',''):
+            freeze_put(today,'next5',result)
+            result=freeze_get(today,'next5') or result
+        now_cn=current_cn
         if now_cn.hour>15 or (now_cn.hour==15 and now_cn.minute>=0):
             try:
                 sd=str(data.get("trade_date") or now_cn.date().isoformat())[:10]
@@ -496,23 +552,38 @@ def analyze_one(code: str):
     except Exception as exc:
         return JSONResponse({"code":code,"name":name,"rows":[],"sector_relations":relation.get("memberships") or [],"error":f"单股分析失败：{type(exc).__name__}: {exc}"})
 
-@app.get("/api/sector-review")
-def sector_review(limit: int=Query(12,ge=6,le=24)):
-    _harvest_refresh()
-    data=_live_cache.get("data") or {}
-    news=data.get("news") or {}
+def _sector_background_done(future,trade_date):
     try:
-        out=build_sector_review(news=news, limit=limit)
-        trade_date=str(data.get("trade_date") or datetime.now(CN_TZ).date().isoformat())
-        save_sector_snapshots(trade_date, out.get("sectors") or [])
-        stored=load_sector_rotation(8)
-        if len(stored.get("timeline") or []) >= 2:
-            out["rotation_sample"] = out.get("rotation")
-            out["rotation"] = stored
-        out["trade_date"] = trade_date
-        return JSONResponse(out)
+        out=future.result()
+        save_sector_snapshots(trade_date,out.get('sectors') or [])
+        stored=load_sector_rotation(3)
+        if len(stored.get('timeline') or [])>=2:
+            out['rotation_sample']=out.get('rotation')
+            out['rotation']=stored
+        out['trade_date']=trade_date
+        with _sector_lock:_sector_last.update(data=out,ts=time.time(),future=None,error=None)
     except Exception as exc:
-        return JSONResponse({"sectors":[],"rotation":{"timeline":[],"path":""},"error":f"板块复盘失败：{type(exc).__name__}: {exc}"})
+        with _sector_lock:_sector_last.update(future=None,error=f'{type(exc).__name__}: {exc}',error_ts=time.time())
+
+@app.get('/api/sector-review')
+def sector_review(limit:int=Query(12,ge=6,le=24)):
+    _harvest_refresh()
+    data=_live_cache.get('data') or {}
+    news=data.get('news') or {}
+    trade_date=str(data.get('trade_date') or now_cn().date().isoformat())
+    with _sector_lock:
+        old=_sector_last.get('data');age=time.time()-_sector_last.get('ts',0)
+        running=_sector_last.get('future')
+        if old and age<480:return JSONResponse({**old,'cached':True})
+        if running is None and not (_sector_last.get('error') and time.time()-_sector_last.get('error_ts',0)<90):
+            future=_sector_pool.submit(build_sector_review,news=news,limit=limit)
+            _sector_last['future']=future
+            future.add_done_callback(lambda f:_sector_background_done(f,trade_date))
+        error=_sector_last.get('error')
+    if old:return JSONResponse({**old,'cached':True,'stale':True,'refreshing':True})
+    if error and time.time()-_sector_last.get('error_ts',0)<90:return JSONResponse({'sectors':[],'rotation':{'timeline':[]},'error':'板块数据源本轮不可用，请稍后刷新：'+error})
+    return JSONResponse({'sectors':[],'rotation':{'timeline':[]},'loading':True,
+        'note':error or '正在独立加载真实板块资金和成分归属；不会阻塞大盘行情'})
 
 @app.get("/api/sector/{board_code}")
 def sector_detail(board_code: str, limit: int=Query(200,ge=20,le=500)):
@@ -660,6 +731,164 @@ def sources_probe():
     probes=probe_sources()
     return {"ok":any(x.get("ok") for x in probes.values()),"elapsed_ms":int((time.time()-started)*1000),"sources":probes}
 
+
+# v6.11 control: public readers may view; privileged writes require an owner secret
+# (configure CONTROL_TOKEN in Render Environment; never commit it to GitHub).
+def _require_owner(token: str | None):
+    import hmac
+    expected=os.getenv('CONTROL_TOKEN','')
+    if not expected:raise HTTPException(503,'请先在Render设置CONTROL_TOKEN，然后才能修改自选或启动全市场扫描')
+    if not token or not hmac.compare_digest(str(token),expected):raise HTTPException(403,'控制口令错误')
+
+class WatchInput(BaseModel):
+    code: str
+    source: str='手动自选'
+    trigger_date: str | None=None
+    trigger_conditions: List[str]=[]
+
+@app.get('/api/watchlist')
+def get_watchlist():return JSONResponse(watch_list())
+
+@app.post('/api/watchlist')
+def post_watchlist(inp:WatchInput,x_control_token: str | None=Header(None)):
+    _require_owner(x_control_token)
+    try:return JSONResponse(watch_add(inp.code,inp.source,inp.trigger_date,inp.trigger_conditions))
+    except Exception as exc:raise HTTPException(422,str(exc))
+
+@app.delete('/api/watchlist/{code}')
+def delete_watchlist(code:str,x_control_token: str | None=Header(None)):
+    _require_owner(x_control_token);watch_remove(code);return {'ok':True}
+
+def enrich_auction_research(raw):
+    # Six independently sourced descriptive factors. Do not fabricate missing archives.
+    day=raw.get('trade_date')
+    try:
+        with sqlite3.connect(DB_PATH,timeout=8) as c:
+            prior=c.execute('SELECT trade_date,score FROM daily_snapshots WHERE trade_date<? ORDER BY trade_date DESC LIMIT 1',(day,)).fetchone()
+            market_score=prior[1] if prior else None
+            historical_codes=set()
+            if prior and prior[0]==TECH.get('day') and TECH.get('status')=='complete':
+                historical_codes={x[0] for x in c.execute('SELECT code FROM technical_hits WHERE trade_date=?',(prior[0],))}
+                historical_known=True
+            else: historical_known=False
+        topics=get_topics(day)
+        topic_known=topics.get('state')=='complete'
+        theme_codes={}
+        if topic_known:
+            for x in topics.get('topics',[]):
+                for st in x.get('stocks',[]):
+                    code=st.get('code')
+                    theme_codes[code]=max(theme_codes.get(code,0),int(x.get('stock_count') or 0))
+        for row in raw.get('items',[]):
+            boom=row.get('boom');gap=row.get('gap');turn=row.get('turnover')
+            factors={
+              'amount':min(100,round(float(row['amount'])/float(row.get('dynamic_amount_floor') or 5e6)*40,1)) if boom is not None else None,
+              'turnover':min(100,round(turn/.75*100,1)) if turn is not None else None,
+              'gap':max(0,round(100-abs(gap-4)*20,1)) if gap is not None else None,
+              'history':(100 if row['code'] in historical_codes else 0) if historical_known else None,
+              'topic':min(100,35+max(0,theme_codes[row['code']]-1)*32) if topic_known and row['code'] in theme_codes else None,
+              'market':round(max(0,min(100,market_score)),1) if market_score is not None else None}
+            row['factor_scores']=factors
+            row['factor_explanation']='研究关注分仅使用已归档竞价、上一交易日情绪、已完成历史股性扫描和可追溯题材关系；缺任何一项不发布总分。'
+            row['score_complete']=all(v is not None for v in factors.values())
+        raw['factor_model']='描述性研究关注分；分数≠上涨概率；权重由浏览器界面调整，不影响原始行情。'
+    except Exception as e:
+        raw['factor_model']='历史研究维度暂不可用，未发布任何未经核实的总分。'
+        for row in raw.get('items',[]):row.update(factor_scores={},score_complete=False)
+    return raw
+
+@app.get('/api/auction25')
+def get_auction25(trade_date:str|None=None, min_amount:float=5000000,min_boom:float=2,
+                  min_turnover:float=.15,min_gap:float=1,max_gap:float=7,min_prev_day_pct:float=2,max_price:float|None=None,
+                  sort:str='amount',limit:int=80,watch_only:bool=False):
+    raw=auction_view(locals())
+    return JSONResponse(enrich_auction_research(raw))
+
+@app.get('/api/auction25/topics')
+def auction_topics(trade_date:str|None=None):
+    return JSONResponse(get_topics(trade_date or now_cn().date().isoformat()))
+
+@app.post('/api/auction25/topics/analyze')
+def auction_topics_analyze(trade_date:str|None=None,x_control_token:str|None=Header(None)):
+    _require_owner(x_control_token)
+    day=trade_date or now_cn().date().isoformat()
+    # Theme classification uses only documented provider membership, not stock names.
+    # News retrieval runs separately and can be absent without affecting quote publication.
+    cached=_news_api_cache.get('data') or {'items':[]}
+    return JSONResponse(build_topics(day,news=cached,max_stocks=80))
+
+@app.get('/api/auction25/backtest')
+def auction_backtest(min_amount:float=5000000,min_boom:float=2,min_turnover:float=.15,
+    min_gap:float=1,max_gap:float=7,max_price:float=80,min_prev_day_pct:float=2,days:int=90):
+    return JSONResponse(replay_real_archive(min_amount,min_boom,min_turnover,min_gap,max_gap,max_price,
+          min_prev_day_pct,max(2,min(days,365))))
+
+@app.post('/api/auction25/capture')
+def capture_auction25(x_control_token:str|None=Header(None)):
+    _require_owner(x_control_token)
+    result=auction_capture()
+    if result.get('ok'):
+        try:build_topics(result.get('trade_date'),news=_news_api_cache.get('data') or {'items':[]},max_stocks=80)
+        except Exception:pass
+    return JSONResponse(result)
+
+_news_api_cache={'data':None,'ts':0,'future':None}
+_news_api_lock=threading.Lock()
+_news_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='independent-news')
+def _get_cached_news():
+    # Avoid a multi-source news timeout blocking live dashboard or next-day research.
+    with _news_api_lock:
+        if _news_api_cache.get('data') and time.time()-_news_api_cache['ts']<300:
+            return _news_api_cache['data']
+        fut=_news_api_cache.get('future')
+        if fut is None or (fut.done() and _news_api_cache.get('ts',0)<time.time()-300):
+            fut=_news_pool.submit(build_news_radar)
+            _news_api_cache['future']=fut
+    try:data=fut.result(timeout=4)
+    except Exception as exc:
+        # Future remains running; next request reuses it rather than launching another fetch.
+        if fut.done():
+            data={'items':[],'clusters':[],'error':f'{type(exc).__name__}: {exc}'}
+        else:return _news_api_cache.get('data') or {'items':[],'clusters':[],
+           'loading':True,'note':'新闻独立获取中，行情与选股不等待'}
+    with _news_api_lock:_news_api_cache.update(data=data,ts=time.time())
+    return data
+
+@app.get('/api/news-live')
+def news_live():
+    return JSONResponse(_get_cached_news())
+
+@app.get('/api/dragon-tiger')
+def dragon_tiger(trade_date:str|None=None):
+    # Cache on server (one request per trading date every 10 minutes max).
+    day=trade_date or now_cn().date().isoformat()
+    with _lock:
+        cached=_dragon_cache.get(day)
+    if cached and time.time()-cached['ts']<600:return JSONResponse(cached['data'])
+    data=fetch_dragons(day)
+    with _lock:_dragon_cache[day]={'ts':time.time(),'data':data}
+    return JSONResponse(data)
+
+@app.post('/api/technical/scan')
+def technical_scan(x_control_token:str|None=Header(None)):
+    _require_owner(x_control_token)
+    return JSONResponse(tech_start_from_source(now_cn().date().isoformat()))
+
+@app.get('/api/technical/results')
+def technical_results(trade_date:str|None=None):
+    return JSONResponse(tech_results(trade_date or now_cn().date().isoformat()))
+
+@app.post('/api/picks/{kind}/regenerate')
+def regenerate(kind:str,x_control_token:str|None=Header(None)):
+    _require_owner(x_control_token)
+    if kind not in {'review','next5'}:raise HTTPException(404,'unknown pick kind')
+    # Erase old freeze only at an explicit owner-triggered action; next GET re-runs the same method.
+    day=now_cn().date().isoformat()
+    if now_cn().hour<15:raise HTTPException(409,'请在交易日15:00后重新生成收盘结果')
+    with sqlite3.connect(DB_PATH,timeout=10) as c:
+        c.execute('DELETE FROM frozen_picks WHERE trade_date=? AND kind=?',(day,kind))
+    return {'ok':True,'date':day,'kind':kind,'note':'已清除当日冻结结果；下次请求将重新生成'}
+
 @app.get("/api/health")
 def health():
     db_ok = True
@@ -672,7 +901,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.10-review-first",
+        "version": "6.11-auction-watchlist",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

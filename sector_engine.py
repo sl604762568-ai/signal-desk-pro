@@ -355,7 +355,7 @@ def build_sector_review(news: Optional[Dict[str, Any]] = None, limit: int = 12) 
     started = time.time()
     sectors = get_sector_heat(news)
     top = sectors[:max(limit, 24)]
-    rotation = build_rotation(top, days=7, sample=min(24, len(top))) if top else {"timeline": [], "path": "", "note": "暂无历史板块数据"}
+    rotation = {'timeline': [], 'path': '', 'note': '最近三日轮动只使用本网站已保存的真实每日板块收盘快照；不足三天时不臆造历史路径。'}
     return {
         "sectors": top[:limit],
         "rotation": rotation,
