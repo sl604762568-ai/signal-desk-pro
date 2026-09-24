@@ -1,3 +1,9 @@
+**最新扩展：v6.12 板块行情终端 + 单项/组合选股，详见 [README_V6_12.md](README_V6_12.md) 和 [DEPLOY_V6_12.md](DEPLOY_V6_12.md)。**
+
+# Signal Desk Pro v6.11.2
+
+读取 `README_V6_11_2.md` 了解本次修复；部署方式保持不变。
+
 # Signal Desk Pro · v6.11
 
 这是从既有 v6.10 继续升级的完整代码。**主要部署与新功能请看 [`README_V6_11.md`](README_V6_11.md)。**

@@ -13,6 +13,7 @@ import requests
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
 HEADERS = {"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"}
 EM_CLIST_HOSTS = [
+    "https://push2delay.eastmoney.com/api/qt/clist/get",
     "https://push2.eastmoney.com/webguest/api/qt/clist/get",
     "https://82.push2.eastmoney.com/webguest/api/qt/clist/get",
     "https://73.push2.eastmoney.com/webguest/api/qt/clist/get",
@@ -22,7 +23,7 @@ EM_CLIST_HOSTS = [
 EM_STOCK = "https://push2.eastmoney.com/api/qt/stock/get"
 EM_SLIST = "https://push2.eastmoney.com/api/qt/slist/get"
 EM_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-TIMEOUT = 4
+TIMEOUT = 2.5
 CACHE_SECONDS = 180
 
 _cache_lock = threading.Lock()
@@ -79,7 +80,7 @@ def _pct_rank(values: List[float], x: float) -> float:
 
 def _board_fs(kind: str) -> str:
     if kind == "industry":
-        return "m:90+s:4"
+        return "m:90+t:2+f:!50"
     return "m:90+t:3+f:!50"
 
 
@@ -93,7 +94,7 @@ def fetch_board_list(kind: str = "concept", limit: int = 500) -> List[Dict[str, 
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2, "invt": 2, "fid": "f3",
         "fs": _board_fs(kind),
-        "fields": "f2,f3,f6,f8,f12,f14,f62,f66,f72,f78,f84,f104,f105,f106,f128,f136,f184,f204,f205",
+        "fields": "f2,f3,f6,f8,f12,f14,f62,f66,f72,f78,f84,f104,f105,f106,f128,f136,f184,f204,f205,f164,f165,f174,f175,f109,f160",
     }
     first = _clist_json({**base, "pn": 1})
     data=(first or {}).get("data") or {}
@@ -124,6 +125,10 @@ def fetch_board_list(kind: str = "concept", limit: int = 500) -> List[Dict[str, 
             "turnover": _f(r.get("f8")), "main_net": _f(r.get("f62")), "main_net_pct": _f(r.get("f184")),
             "super_net": _f(r.get("f66")), "large_net": _f(r.get("f72")), "mid_net": _f(r.get("f78")), "small_net": _f(r.get("f84")),
             "up": up, "down": down, "flat": flat, "breadth": (up / total_n * 100 if total_n else 50.0),
+            "main_net_5d": (None if r.get("f164") in (None,"-") else _f(r.get("f164"))),
+            "main_net_10d": (None if r.get("f174") in (None,"-") else _f(r.get("f174"))),
+            "pct_5d": (None if r.get("f109") in (None,"-") else _f(r.get("f109"))),
+            "pct_10d": (None if r.get("f160") in (None,"-") else _f(r.get("f160"))),
             "leader_name": str(r.get("f204") or r.get("f128") or ""),
             "leader_code": str(r.get("f205") or ""),
         })

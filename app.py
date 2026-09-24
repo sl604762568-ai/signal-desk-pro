@@ -27,6 +27,7 @@ from review_selector import build_review_picks
 from stock_analysis import analyze_stock
 from nextday_selector import build_next5
 from sector_engine import build_sector_review, fetch_board_members, sector_context_for_stock
+from terminal_explorer import explore as explore_boards, sector_members as verified_sector_members, scan as scan_factors, HOT_GROUPS
 from review_engine import build_close_review
 from v611_features import (init as init_v611, freeze_get, freeze_put, freeze_latest, watch_add, watch_list, watch_remove, auction_capture, record_daily_close, auction_view, tech_start, tech_results, tech_start_from_source, now as now_cn)
 from v611_dragon import fetch_dragons
@@ -43,7 +44,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.11.1-nonblocking-review")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.12-sector-factor-terminal")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -486,39 +487,77 @@ def stock_detail(code: str):
         return JSONResponse({"code":code,"rows":[],"error":f"{type(exc).__name__}: {exc}"})
 
 
-@app.get("/api/next5")
-def next5():
-    today=now_cn().date().isoformat()
-    frozen=freeze_get(today,'next5')
-    if frozen:return JSONResponse(frozen)
-    if now_cn().hour<15:
-        archived=freeze_latest('next5',today)
-        if archived:return JSONResponse({**archived,'note':'显示最近收盘固定的次日五股，盘中刷新不改变名单'})
-    _harvest_refresh()
-    data=_live_cache.get("data")
-    if not data:
-        _start_refresh(force=False)
-        return JSONResponse({"environment":{},"picks":[],"scanned":0,"error":"真实行情尚未准备好，请稍后再试。"})
+# Next-day research candidates: one nonblocking job, success-only daily freezing.
+_next5_lock = threading.RLock()
+_next5_cache: Dict[str, Any] = {"ts": 0.0, "data": None, "trade_date": None}
+_next5_state: Dict[str, Any] = {"running": False, "started": 0.0, "error": None}
+
+
+def _next5_worker(data: Dict[str, Any], trade_date: str) -> None:
+    result: Dict[str, Any]
     try:
         from public_sources import fetch_history_df
-        news=_get_cached_news()
-        result=build_next5(data, news, fetch_history_df, limit=5)
-        result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
-        result["trade_date"]=data.get('trade_date')
-        current_cn=datetime.now(CN_TZ)
-        if current_cn.hour>=15 and str(data.get('trade_date') or '').replace('-','')[:8]==today.replace('-',''):
-            freeze_put(today,'next5',result)
-            result=freeze_get(today,'next5') or result
-        now_cn=current_cn
-        if now_cn.hour>15 or (now_cn.hour==15 and now_cn.minute>=0):
+        news = _get_cached_news()
+        result = build_next5(data, news, fetch_history_df, limit=5)
+        result["updated_at"] = datetime.now(CN_TZ).isoformat(timespec="seconds")
+        result["trade_date"] = trade_date
+        # Never freeze a no-data or failed scan as that day's recommendation.
+        valid = bool(result.get("picks")) and not result.get("error")
+        if valid and datetime.now(CN_TZ).hour >= 15 and trade_date == now_cn().date().isoformat():
+            freeze_put(trade_date, "next5", result)
+            result = freeze_get(trade_date, "next5") or result
             try:
-                sd=str(data.get("trade_date") or now_cn.date().isoformat())[:10]
-                result["paper_saved"]=store_paper_signals(DB_PATH, sd, result.get("picks") or [])
-            except Exception as _paper_exc:
-                result["paper_save_error"]=str(_paper_exc)
-        return JSONResponse(result)
+                result["paper_saved"] = store_paper_signals(DB_PATH, trade_date, result["picks"])
+            except Exception as exc:
+                result["paper_save_error"] = str(exc)
+        with _next5_lock:
+            _next5_cache.update(ts=time.time(), data=result, trade_date=trade_date)
+            _next5_state.update(running=False, error=None if valid else (result.get("error") or "未找到通过核验的候选"))
     except Exception as exc:
-        return JSONResponse({"environment":{},"picks":[],"scanned":0,"error":f"次日联动筛选失败：{type(exc).__name__}: {exc}"})
+        with _next5_lock:
+            _next5_state.update(running=False, error=f"{type(exc).__name__}: {exc}")
+
+
+@app.get("/api/next5")
+def next5():
+    now = time.time()
+    today = now_cn().date().isoformat()
+    frozen = freeze_get(today, "next5")
+    if frozen:
+        return JSONResponse(frozen)
+    # Before close the latest completed trading day's frozen report is preferable to a re-scan.
+    if now_cn().hour < 15:
+        archived = freeze_latest("next5", today)
+        if archived:
+            return JSONResponse({**archived, "note": "上一个交易日冻结的研究候选，非盘中实时推荐"})
+    _harvest_refresh()
+    live = _live_cache.get("data")
+    if not live or not live.get("is_live"):
+        _start_refresh(force=False)
+        archived = freeze_latest("next5", today)
+        if archived:
+            return JSONResponse({**archived, "stale": True, "note": "当前实时行情未完成，显示已保存的历史候选"})
+        return JSONResponse({"loading": True, "state": "waiting_for_real_market", "picks": [],
+            "note": "真实行情尚未准备好；不会以演示数据生成选股。"})
+    trade_date = str(live.get("trade_date") or "")[:10]
+    with _next5_lock:
+        cached = _next5_cache.get("data")
+        cache_age = now - float(_next5_cache.get("ts") or 0)
+        if cached and _next5_cache.get("trade_date") == trade_date and cache_age < 3600:
+            return JSONResponse({**cached, "cached": True})
+        if _next5_state.get("running"):
+            age = now - float(_next5_state.get("started") or now)
+            if age > 70:
+                return JSONResponse({"loading": False, "picks": [], "state": "scan_slow",
+                    "error": "历史K线/板块数据源响应较慢，后台仍在分析；无需连续刷新。", "elapsed_seconds": round(age, 1)})
+            return JSONResponse({"loading": True, "picks": [], "state": "scanning", "elapsed_seconds": round(age, 1)})
+        if _next5_state.get("error") and now - float(_next5_cache.get("ts") or 0) < 40:
+            return JSONResponse({"loading": False, "picks": [], "error": _next5_state["error"]})
+        _next5_state.update(running=True, started=now, error=None)
+        threading.Thread(target=_next5_worker, args=(dict(live), trade_date), daemon=True,
+                         name="next5-independent-scan").start()
+    return JSONResponse({"loading": True, "picks": [], "state": "scanning", "note": "次日5股正在独立扫描真实行情"})
+
 
 @app.get("/api/search")
 def search_stock(q: str=Query("", min_length=1, max_length=32), limit: int=Query(12,ge=1,le=30)):
@@ -620,7 +659,13 @@ def sector_review(limit:int=Query(12,ge=6,le=24)):
             future.add_done_callback(lambda f:_sector_background_done(f,trade_date))
         error=_sector_last.get('error')
     if old:return JSONResponse({**old,'cached':True,'stale':True,'refreshing':True})
-    if error and time.time()-_sector_last.get('error_ts',0)<90:return JSONResponse({'sectors':[],'rotation':{'timeline':[]},'error':'板块数据源本轮不可用，请稍后刷新：'+error})
+    if error and time.time()-_sector_last.get('error_ts',0)<90:
+        stored=load_sector_rotation(3)
+        # An archived rotation contains only genuine previous close records, not current heat.
+        if stored.get('timeline'):
+            return JSONResponse({'sectors':[], 'rotation':stored, 'historical_only':True,
+                'error':'今日板块接口不可用，仅能显示历史真实板块快照。'})
+        return JSONResponse({'sectors':[], 'rotation':{'timeline':[]},'error':'行业/概念板块实时源均未成功返回。板块数据暂不可用，不使用虚构板块数据。'})
     return JSONResponse({'sectors':[],'rotation':{'timeline':[]},'loading':True,
         'note':error or '正在独立加载真实板块资金和成分归属；不会阻塞大盘行情'})
 
@@ -928,6 +973,64 @@ def regenerate(kind:str,x_control_token:str|None=Header(None)):
         c.execute('DELETE FROM frozen_picks WHERE trade_date=? AND kind=?',(day,kind))
     return {'ok':True,'date':day,'kind':kind,'note':'已清除当日冻结结果；下次请求将重新生成'}
 
+# ---- v6.12: independent board terminal and real observed-universe factor scanner ----
+@app.get('/api/boards/explorer')
+def boards_explorer(category: str=Query('industry',pattern='^(industry|concept|hot|style|region)$'),
+                    group: str='',limit:int=Query(100,ge=1,le=550)):
+    return JSONResponse(explore_boards(category=category,group=group,limit=limit))
+
+@app.get('/api/boards/explorer/rotation')
+def boards_rotation():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            dates=[x[0] for x in conn.execute('SELECT DISTINCT trade_date FROM sector_snapshots ORDER BY trade_date DESC LIMIT 3')]
+            days=[]
+            for d in reversed(dates):
+                rows=conn.execute('SELECT board_code,board_name,heat,pct,breadth,main_net_pct FROM sector_snapshots WHERE trade_date=? ORDER BY heat DESC LIMIT 8',(d,)).fetchall()
+                days.append({'date':d,'top':[{'code':r[0],'name':r[1],'heat':r[2],'pct':r[3],'breadth':r[4],'net_pct':r[5]} for r in rows]})
+        return {'days':days,'complete':len(days)==3,'source':'本网站实际保存的交易日板块快照','note':'不足三天时不补造历史'}
+    except Exception as e:return {'days':[],'complete':False,'error':type(e).__name__}
+
+@app.get('/api/boards/explorer/groups')
+def board_groups():
+    return {'groups':list(HOT_GROUPS),'note':'分组只选真实概念板块；股票归属只能按板块成分关系判定'}
+
+@app.get('/api/boards/explorer/{code}/members')
+def board_explorer_members(code:str,limit:int=Query(100,ge=1,le=400)):
+    try:return JSONResponse(verified_sector_members(code,limit))
+    except Exception as exc:return JSONResponse({'members':[],'error':f'{type(exc).__name__}: {exc}'})
+
+class FactorRequest(BaseModel):
+    codes: list[str] = []
+    conditions: dict[str,Any] = {}
+    sort: str = 'speed_1m_pct'
+    limit: int = 50
+
+@app.post('/api/factors/scan')
+def factors_scan(inp:FactorRequest):
+    # An explicit monitored list wins. Otherwise use only the real currently
+    # available market snapshot, never the demonstration fallback.
+    _harvest_refresh()
+    live=_live_cache.get('data') or {}
+    codes=inp.codes
+    if not codes:
+        if live.get('is_live'):
+            basket=(live.get('review_universe') or [])+(live.get('active_stocks') or [])
+            codes=list(dict.fromkeys(str(x.get('code')) for x in basket if x.get('code')))[:160]
+    if not codes:
+        return {'rows':[],'error':'无真实监控池，请等待行情缓存或输入股票代码',
+            'matched':0,'observed':0,'requested':0,'coverage':0}
+    live_meta={str(x.get('code')):x for x in (live.get('review_universe') or [])+(live.get('active_stocks') or []) if x.get('code')}
+    result=scan_factors(codes,inp.conditions,inp.sort,inp.limit,metadata=live_meta)
+    # Enrich only non-price static metadata from same verified live snapshot.
+    by_code={str(x.get('code')):x for x in (live.get('review_universe') or [])}
+    for row in result['rows']:
+        original=by_code.get(row['code']) or {}
+        for field in ('float_market_cap','industry'):
+            if original.get(field) is not None:row[field]=original[field]
+    result['universe']='用户输入' if inp.codes else '当前真实行情监控池（最多160只，并非全A）'
+    return JSONResponse(result)
+
 @app.get("/api/health")
 def health():
     db_ok = True
@@ -940,10 +1043,12 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.11.1-nonblocking-review",
+        "version": "6.12-sector-factor-terminal",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
         "refresh": _refresh_meta(),
+        "next5": {"running": bool(_next5_state["running"]), "error": _next5_state["error"], "has_cache": bool(_next5_cache["data"])},
+        "sector_review": {"running": _sector_last.get("future") is not None, "error": _sector_last.get("error"), "has_cache": bool(_sector_last.get("data"))},
         "close_review": {"running": bool(_close_review_state["running"]), "last_error": _close_review_state["error"], "attempt": _close_review_state["attempt"], "has_cache": _close_review_cache["data"] is not None},
     }

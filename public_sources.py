@@ -333,6 +333,7 @@ def fetch_tencent_quotes(codes: List[str]) -> Tuple[List[Dict[str, Any]], Dict[s
                     "code":code,"name":f[1],"price":price,"pct":pct,"open":op,
                     "prev_close":prev,"high":high,"low":low,"amount":amount,
                     "turnover_rate":turnover,"volume_ratio":volume_ratio,"industry":"",
+                    "quote_time":f[30] if len(f)>30 and str(f[30]).isdigit() and len(str(f[30]))>=12 else None,
                 })
             except Exception as exc:
                 errors.append(type(exc).__name__)

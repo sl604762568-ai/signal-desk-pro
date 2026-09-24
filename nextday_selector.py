@@ -114,7 +114,7 @@ def _real_sector_membership(news: Dict[str,Any], topn: int = 10) -> tuple[Dict[s
         sectors=get_sector_heat(news)[:topn]
         stock_map: Dict[str,List[Dict[str,Any]]] = {}
         with ThreadPoolExecutor(max_workers=min(8,max(1,len(sectors)))) as ex:
-            jobs={ex.submit(fetch_board_members,s["code"],300):s for s in sectors}
+            jobs={ex.submit(fetch_board_members,s["code"],140):s for s in sectors}
             for fut in as_completed(jobs):
                 sec=jobs[fut]
                 try: members=fut.result()
@@ -131,7 +131,7 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
     mscore=n((market.get("sentiment") or {}).get("score"),50)
     mstage=str((market.get("sentiment") or {}).get("stage","中性"))
     stocks=market.get("review_universe") or market.get("active_stocks") or []
-    stock_sector_map, hot_sectors, sector_error = _real_sector_membership(news, topn=10)
+    stock_sector_map, hot_sectors, sector_error = _real_sector_membership(news, topn=4)
     market_gate = bool(mscore >= 55 and macro["score"] >= 43)
     pool=[]
     for s in stocks:
@@ -148,11 +148,11 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
         sector_pre=max([n(x.get("heat"),50) for x in stock_sector_map.get(code,[])],default=50)
         pre = band_score(amt/1e8,.8,2,18,45)*.24 + band_score(tr,1,4,16,28)*.28 + band_score(pct,-1,1,7,9.5)*.16 + (band_score(cap,10,25,120,320) if cap>0 else 55)*.12 + sector_pre*.20
         pool.append((pre,s))
-    pool=[s for _,s in sorted(pool,key=lambda z:z[0],reverse=True)[:72]]
+    pool=[s for _,s in sorted(pool,key=lambda z:z[0],reverse=True)[:28]]
 
     rows=[]
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        jobs={ex.submit(history_fetcher,str(s.get("code",'')).zfill(6),100):s for s in pool}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        jobs={ex.submit(history_fetcher,str(s.get("code",'')).zfill(6),82):s for s in pool}
         for fut in as_completed(jobs):
             s=jobs[fut]
             try:
