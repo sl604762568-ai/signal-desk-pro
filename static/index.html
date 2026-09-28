@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#080b12"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <link rel="manifest" href="/manifest.webmanifest"/>
-<title>Signal Desk Pro v6.11 · 复盘 · 竞价 · 龙虎榜 · 自选</title>
+<title>Signal Desk Pro v6.12.1 · 复盘 · 竞价 · 龙虎榜 · 自选</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
 :root{--bg:#070a10;--panel:#0d111a;--panel2:#111722;--line:#202938;--line2:#2d394d;--txt:#eef3fb;--muted:#8b98aa;--red:#ff5d65;--green:#2bd78d;--amber:#ffbd4a;--blue:#6ea8ff;--purple:#9b83ff;--cyan:#61d8ff;--shadow:0 18px 45px rgba(0,0,0,.28)}
@@ -77,7 +77,7 @@
 </section>
 
 <section class="section" id="auction">
- <div class="secHead"><div><h2>9:25 集合竞价 · 真实快照</h2><p>独立竞价页面 · 保存交易日北京时间09:25最终快照；缺失前日竞价或历史数据时不伪造爆量倍数。</p></div><button class="btn primary" onclick="loadAuction()">读取今日竞价</button></div>
+ <div class="secHead"><div><h2>9:25 集合竞价 · 真实快照</h2><p>东财实时主采集 + eltdx 历史09:25正式撮合补采。缺失历史时不使用模拟值。</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" onclick="loadAuction()">读取今日竞价</button><button class="btn" onclick="backfillAuction()">补采今日/近5日</button></div></div>
  <div class="panel pad">
   <div class="filtergrid">
    <label>股价不高于<input id="aucMaxPrice" type="number" value="80" min="0" step="1"></label>
@@ -580,9 +580,22 @@ async function loadAuctionBacktest(){
  }catch(e){$('aucBacktest').textContent='历史研究不可用：'+e.message;}
 }
 async function captureAuction(){
- $('auctionState').textContent='尝试验证真实09:25时间戳…';
+ $('auctionState').textContent='尝试实时09:25主采集…';
  const r=await fetch('/api/auction25/capture',{method:'POST',headers:controlHeaders()});let d=await r.json();
  $('auctionState').textContent=d.error||d.reason||((d.rows||0)+'只已采集');if(d.ok){loadAuction();setTimeout(loadAuctionTopics,5000);}
+}
+async function backfillAuction(){
+ try{
+  $('auctionState').textContent='后台补采真实09:25正式撮合与近5日竞价历史…';
+  const r=await fetch('/api/auction25/backfill?days=6',{method:'POST',headers:controlHeaders()});const d=await r.json();
+  if(!r.ok)throw Error(d.detail||'无法启动补采');
+  let n=0;const timer=setInterval(async()=>{
+    n++;try{const rr=await fetch('/api/auction25/status',{cache:'no-store'}),st=await rr.json(),c=st.collector||{};
+      $('auctionState').textContent=`补采状态 ${c.state||'running'} · 今日已存 ${st.stored_rows||0}只 · 历史${c.history_days||0}日`+(c.error?' · '+c.error:'');
+      if(c.state==='complete'||c.state==='error'||n>80){clearInterval(timer);loadAuction();setTimeout(loadAuctionTopics,3000);}
+    }catch(e){}
+  },3000);
+ }catch(e){$('auctionState').textContent='补采启动失败：'+e.message;}
 }
 async function startTechnicalScan(){
  try{const r=await fetch('/api/technical/scan',{method:'POST',headers:controlHeaders()});const d=await r.json();

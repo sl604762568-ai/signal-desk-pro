@@ -32,6 +32,7 @@ from review_engine import build_close_review
 from v611_features import (init as init_v611, freeze_get, freeze_put, freeze_latest, watch_add, watch_list, watch_remove, auction_capture, record_daily_close, auction_view, tech_start, tech_results, tech_start_from_source, now as now_cn)
 from v611_dragon import fetch_dragons
 from v611_auction_analysis import init as init_auction_topics, build_topics, get_topics, replay_real_archive
+from auction_capture_v6121 import capture_eastmoney_925, start_backfill as start_auction_backfill, get_status as auction_capture_status, count_day as auction_count_day
 from paper_trader import (init_paper_db, get_settings as get_paper_settings, save_settings as save_paper_settings,
                           reset_account as reset_paper_account, store_signals as store_paper_signals,
                           has_signals_for, run_engine as run_paper_engine, get_portfolio as get_paper_portfolio,
@@ -44,7 +45,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.12-sector-factor-terminal")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.12.1-auction-multisource")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -312,22 +313,30 @@ def _paper_background_loop():
         time.sleep(60)
 
 def _auction_heartbeat():
-    """Best-effort capture while instance is awake; no guarantee on Render Free suspension."""
-    last=None
+    """Multi-attempt 09:25 collector + historical recovery after the live window.
+    Live capture accepts only provider rows whose source timestamp is 09:25.
+    If the free Render instance sleeps through that window, eltdx historical 09:25 official match is backfilled when the instance wakes.
+    """
+    last_live_ok=None
+    last_backfill_start=None
     last_close=None
     while True:
-        t=now_cn()
-        day=t.date().isoformat()
-        if t.weekday()<5 and t.hour==9 and t.minute==25 and day!=last:
-            outcome=auction_capture()
-            if outcome.get('ok'):
-                last=day
-                try:build_topics(day,news=_news_api_cache.get('data') or {'items':[]},max_stocks=80)
-                except Exception:pass
-        if t.weekday()<5 and t.hour==15 and 5<=t.minute<=29 and day!=last_close:
-            close_result=record_daily_close()
-            if close_result.get('ok'):last_close=day
-        time.sleep(8 if t.hour==9 and 23<=t.minute<=26 else 60)
+        t=now_cn(); day=t.date().isoformat(); sec=t.hour*3600+t.minute*60+t.second
+        if t.weekday()<5:
+            # Retry every few seconds through the entire opening-capture window.
+            if 9*3600+24*60+45 <= sec <= 9*3600+27*60+30 and day!=last_live_ok:
+                outcome=capture_eastmoney_925(DB_PATH,allow_window=True)
+                if outcome.get('ok'):
+                    last_live_ok=day
+                    try:build_topics(day,news=_news_api_cache.get('data') or {'items':[]},max_stocks=80)
+                    except Exception:pass
+            # If no real 09:25 archive exists after the live window, start historical recovery once.
+            if sec>9*3600+27*60+30 and auction_count_day(DB_PATH,day)==0 and day!=last_backfill_start:
+                start_auction_backfill(DB_PATH,day,6); last_backfill_start=day
+            if t.hour==15 and 5<=t.minute<=29 and day!=last_close:
+                close_result=record_daily_close()
+                if close_result.get('ok'):last_close=day
+        time.sleep(6 if t.hour==9 and 24<=t.minute<=28 else 30)
 
 @app.on_event("startup")
 def _startup():
@@ -907,14 +916,24 @@ def auction_backtest(min_amount:float=5000000,min_boom:float=2,min_turnover:floa
     return JSONResponse(replay_real_archive(min_amount,min_boom,min_turnover,min_gap,max_gap,max_price,
           min_prev_day_pct,max(2,min(days,365))))
 
+@app.get('/api/auction25/status')
+def auction25_status():
+    day=now_cn().date().isoformat()
+    return JSONResponse({'trade_date':day,'stored_rows':auction_count_day(DB_PATH,day),'collector':auction_capture_status()})
+
 @app.post('/api/auction25/capture')
 def capture_auction25(x_control_token:str|None=Header(None)):
     _require_owner(x_control_token)
-    result=auction_capture()
+    result=capture_eastmoney_925(DB_PATH,allow_window=True)
     if result.get('ok'):
         try:build_topics(result.get('trade_date'),news=_news_api_cache.get('data') or {'items':[]},max_stocks=80)
         except Exception:pass
     return JSONResponse(result)
+
+@app.post('/api/auction25/backfill')
+def auction25_backfill(trade_date:str|None=None,days:int=6,x_control_token:str|None=Header(None)):
+    _require_owner(x_control_token)
+    return JSONResponse(start_auction_backfill(DB_PATH,trade_date,max(2,min(8,days))))
 
 _news_api_cache={'data':None,'ts':0,'future':None}
 _news_api_lock=threading.Lock()
@@ -1043,7 +1062,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.12-sector-factor-terminal",
+        "version": "6.12.1-auction-multisource",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
