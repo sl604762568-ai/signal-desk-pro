@@ -1,7 +1,7 @@
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pandas>=2.0
-requests>=2.31
-beautifulsoup4>=4.12
+fastapi>=0.110,<1
+uvicorn>=0.30,<1
+pandas>=2.0,<3
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
 levistock==0.1.7
 eltdx==3.2.2
