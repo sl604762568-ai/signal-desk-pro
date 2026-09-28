@@ -251,7 +251,11 @@ def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], history_fet
         return {"regime": regime, "picks": [], "chan_picks": [], "scanned": 0, "error": "真实日线数据源不可用，无法执行全市场复盘选股。"}
 
     # Historical calls are expensive. First rank by liquidity/activity, then fetch a capped pool.
-    pool = sorted(universe, key=lambda x: (n(x.get("amount")), abs(n(x.get("pct")))), reverse=True)[:48]
+    def _pre_rank(x):
+        pct=n(x.get("pct")); amt=n(x.get("amount")); tr=n(x.get("turnover_rate")); vr=n(x.get("volume_ratio"))
+        extension=max(0,abs(pct)-5)*10
+        return math.log10(max(amt,1e7))*10 + min(20,tr) + min(18,vr*7) - extension
+    pool = sorted(universe, key=_pre_rank, reverse=True)[:60]
     picks: List[Dict[str, Any]] = []
     chan: List[Dict[str, Any]] = []
     scanned = 0
@@ -279,10 +283,13 @@ def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], history_fet
         found = _signals(df)
         for strategy, sig in found.items():
             weight = n(regime["weights"].get(strategy), 1)
-            score = clamp(sig["base"] * weight + topic_bonus + liquidity)
+            extension_penalty=max(0,n(sig.get("ret20"))-14)*0.80 + max(0,abs(n(sig.get("bias20")))-8)*1.35
+            early_bonus=6 if -2<=n(sig.get("ret20"))<=18 and abs(n(sig.get("bias20")))<=8 else 0
+            score = clamp(sig["base"] * weight + topic_bonus + liquidity + early_bonus - extension_penalty)
             risks: List[str] = []
             if abs(n(sig.get("bias20"))) > 9: risks.append("偏离MA20较大")
-            if n(sig.get("ret20")) > 35: risks.append("20日累计涨幅较高")
+            if n(sig.get("ret20")) > 18: risks.append("20日累计涨幅偏高，已降低复盘优先级")
+            if n(sig.get("ret20")) > 32 or abs(n(sig.get("bias20")))>15: continue
             if n(sig.get("vol_ratio5")) > 3.2: risks.append("量能接近过热")
             if regime["level"] == "弱" and strategy == "平台放量突破": risks.append("弱市突破需重点复核失败风险")
             picks.append({

@@ -334,6 +334,56 @@ def _roles(current: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out[:12]
 
 
+
+
+def _dragon_genealogy(current: List[Dict[str, Any]], rotation: Dict[str, Any], historical: Dict[str,List[Dict[str,Any]]], dates: List[str]) -> List[Dict[str,Any]]:
+    if not current:
+        return []
+    def simple(x, role, why):
+        return {'role':role,'code':x.get('code'),'name':x.get('name'),'theme':(_theme_key(x) or ['其他'])[0],
+                'board':int(x.get('continuous') or 1),'first_zt_time':x.get('first_zt_time',''),'amount':_num(x.get('amount')),
+                'reason':x.get('reason',''),'analysis':why}
+    out=[]; used=set()
+    by_board=sorted(current,key=lambda z:(int(z.get('continuous') or 1),-_time_key(z.get('first_zt_time')),_num(z.get('amount'))),reverse=True)
+    space=by_board[0];out.append(simple(space,'空间龙','当前连板高度最高，代表市场空间高度'));used.add(space['code'])
+    # 周期龙：优先取三日增强/延续题材中的最高板。
+    active={x.get('theme') for x in (rotation.get('transitions') or []) if x.get('state') in ('增强','延续','新发酵')}
+    cyc=[x for x in current if (_theme_key(x) or [''])[0] in active]
+    if cyc:
+        x=sorted(cyc,key=lambda z:(int(z.get('continuous') or 1),_num(z.get('amount'))),reverse=True)[0]
+        if x['code'] not in used:out.append(simple(x,'周期龙','所属题材在三日轮动中处于增强/延续/新发酵，且个股高度领先'));used.add(x['code'])
+    # 换手龙：高换手+高成交额，但不只看连板高度。
+    x=max(current,key=lambda z:(_num(z.get('turnover_rate')),_num(z.get('amount'))))
+    if x['code'] not in used:out.append(simple(x,'换手龙',f"换手{_num(x.get('turnover_rate')):.1f}%且成交活跃，观察分歧承接"));used.add(x['code'])
+    # 日内龙 / 点火者：最早封板。
+    x=min(current,key=lambda z:_time_key(z.get('first_zt_time')) or 999999)
+    if x['code'] not in used:out.append(simple(x,'日内龙·点火者','当日最早封板之一，体现题材点火和资金先手'));used.add(x['code'])
+    # 补涨龙：热门题材里的低位首板/二板，资金活跃。
+    low=[x for x in current if int(x.get('continuous') or 1)<=2 and (_theme_key(x) or [''])[0] in active]
+    if low:
+        x=max(low,key=lambda z:_num(z.get('amount'))+_num(z.get('turnover_rate'))*1e7)
+        if x['code'] not in used:out.append(simple(x,'补涨龙','处于活跃题材低位梯队，尚未成为空间高标，关注补涨承接'));used.add(x['code'])
+    # 承接者：同题材中军/大成交。
+    x=max(current,key=lambda z:_num(z.get('amount')))
+    if x['code'] not in used:out.append(simple(x,'承接者·中军','当日成交额靠前，承担题材容量与资金承接'));used.add(x['code'])
+    # 穿越龙：前一日已有高度且今日仍存活。
+    prev_codes={}
+    if len(dates)>=2:
+        for z in historical.get(dates[-2],[]) or []:prev_codes[z.get('code')]=int(z.get('continuous') or 1)
+    survivors=[x for x in current if prev_codes.get(x.get('code'),0)>=2 and int(x.get('continuous') or 1)>=prev_codes.get(x.get('code'),0)]
+    if survivors:
+        x=max(survivors,key=lambda z:int(z.get('continuous') or 1))
+        if x['code'] not in used:out.append(simple(x,'穿越龙（老龙穿越）','前一交易日已有连板高度，今日仍维持/晋级，体现跨周期生存'));used.add(x['code'])
+    # 撤退龙：昨日高标今日未进入涨停池。
+    if len(dates)>=2:
+        prev=historical.get(dates[-2],[]) or []
+        curcodes={x.get('code') for x in current}
+        gone=[x for x in prev if int(x.get('continuous') or 1)>=2 and x.get('code') not in curcodes]
+        if gone:
+            x=max(gone,key=lambda z:int(z.get('continuous') or 1))
+            out.append(simple(x,'撤退龙','昨日高标今日未维持涨停，作为退潮/高位分歧观察样本'))
+    return out[:8]
+
 def _cls_rotation(lk: Any) -> List[Dict[str, Any]]:
     obj,err=_safe_call(lk,'get_sector_rotation',days=3)
     data=_rows(obj)
@@ -473,6 +523,7 @@ def build_close_review() -> Dict[str, Any]:
 
     # Role model is descriptive, based on current limit pool structure.
     roles=_roles(current)
+    genealogy=_dragon_genealogy(current,rotation,historical,dates)
 
     # Dedicated theme summary for top current themes.
     today_themes=day_blocks[-1]['themes'] if day_blocks else []
@@ -483,7 +534,7 @@ def build_close_review() -> Dict[str, Any]:
         'seal_rate':(_num(emo.get('up_ratio')) if emo.get('up_ratio') is not None else None),'max_board':max_board,
         'highest_stocks':[{'code':x['code'],'name':x['name'],'board':x['continuous'],'theme':(_theme_key(x) or ['其他'])[0],'sector':x.get('sector',''),'reason':x.get('reason','')} for x in highest],
         'ladder':ladder,'promotion_rates':promotion,'yesterday_premium':yesterday_premium,
-        'roles':roles,'theme_today':today_themes,'rotation3':rotation,'sector_rotation3':cls_rotation,
+        'roles':roles,'dragon_genealogy':genealogy,'theme_today':today_themes,'rotation3':rotation,'sector_rotation3':cls_rotation,
         'checks':checks,'source_status':source_status,
         'reference_counts':{'eastmoney':{'zt':zt_count,'dt':dt_count},'kph_emotion':{'zt':kph_zt,'dt':kph_dt},'kph_resumption':{'zt':resume_zt,'dt':resume_dt}},
         'note':'涨停/跌停/连板采用专门涨跌停池与开盘红涨停复盘/天梯交叉校准，不再从全A涨幅近似推算；源冲突时关键数字不发布。题材轮动固定比较今天+前2个交易日。',

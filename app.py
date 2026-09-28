@@ -33,6 +33,8 @@ from v611_features import (init as init_v611, freeze_get, freeze_put, freeze_lat
 from v611_dragon import fetch_dragons
 from v611_auction_analysis import init as init_auction_topics, build_topics, get_topics, replay_real_archive
 from auction_capture_v6121 import capture_eastmoney_925, start_backfill as start_auction_backfill, get_status as auction_capture_status, count_day as auction_count_day
+from global_risk import build_global_risk
+from intraday_selector import build_intraday_picks
 from paper_trader import (init_paper_db, get_settings as get_paper_settings, save_settings as save_paper_settings,
                           reset_account as reset_paper_account, store_signals as store_paper_signals,
                           has_signals_for, run_engine as run_paper_engine, get_portfolio as get_paper_portfolio,
@@ -45,7 +47,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.12.1-auction-multisource")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.13-review-role-intraday-risk")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -507,7 +509,11 @@ def _next5_worker(data: Dict[str, Any], trade_date: str) -> None:
     try:
         from public_sources import fetch_history_df
         news = _get_cached_news()
-        result = build_next5(data, news, fetch_history_df, limit=5)
+        enriched=dict(data)
+        with _close_review_lock:
+            if isinstance(_close_review_cache.get("data"),dict) and _close_review_cache["data"].get("ok"):
+                enriched["close_review"]=_close_review_cache["data"]
+        result = build_next5(enriched, news, fetch_history_df, limit=5)
         result["updated_at"] = datetime.now(CN_TZ).isoformat(timespec="seconds")
         result["trade_date"] = trade_date
         # Never freeze a no-data or failed scan as that day's recommendation.
@@ -652,6 +658,28 @@ def _sector_background_done(future,trade_date):
     except Exception as exc:
         with _sector_lock:_sector_last.update(future=None,error=f'{type(exc).__name__}: {exc}',error_ts=time.time())
 
+def _sector_theme_fallback(limit:int=12):
+    with _close_review_lock:
+        cr=_close_review_cache.get('data') or {}
+    themes=cr.get('theme_today') or []
+    if not themes:
+        themes=[{'theme':x.get('theme'),'count':x.get('count'),'max_board':x.get('max_board'),'first_board':x.get('first_board_count'),'leader':x.get('leader'),'score':max(40,100-i*7)} for i,x in enumerate(cr.get('roles') or []) if x.get('theme')]
+    if not themes:
+        return None
+    rows=[]
+    for i,x in enumerate(themes[:limit],1):
+        rows.append({'code':'','name':x.get('theme'),'type':'theme','rank':i,'heat':min(100,float(x.get('score') or 0)),
+            'pct':None,'breadth':None,'main_net_pct':None,'main_net':None,'up':x.get('count'),'down':None,
+            'leader_name':(x.get('leader') or {}).get('name'),'leader_code':(x.get('leader') or {}).get('code'),
+            'theme_count':x.get('count'),'max_board':x.get('max_board'),'first_board':x.get('first_board'),
+            'source':'真实涨停题材复盘降级视图'})
+    rot=cr.get('rotation3') or {}; timeline=[]
+    for d in rot.get('days') or []:
+        th=d.get('themes') or []; top=[{'name':x.get('theme'),'count':x.get('count'),'max_board':x.get('max_board')} for x in th[:3]]
+        timeline.append({'date':d.get('date'),'leader':top[0] if top else {},'top3':top})
+    return {'sectors':rows,'rotation':{'timeline':timeline,'path':rot.get('path'),'note':'来自真实涨停池三日题材轮动'},'theme_fallback':True,
+            'relation_note':'板块push2实时源失败，当前使用真实涨停池题材聚合做收盘复盘降级视图；不展示未取得的板块资金字段。'}
+
 @app.get('/api/sector-review')
 def sector_review(limit:int=Query(12,ge=6,le=24)):
     _harvest_refresh()
@@ -671,6 +699,10 @@ def sector_review(limit:int=Query(12,ge=6,le=24)):
     if error and time.time()-_sector_last.get('error_ts',0)<90:
         stored=load_sector_rotation(3)
         # An archived rotation contains only genuine previous close records, not current heat.
+        fallback=_sector_theme_fallback(limit)
+        if fallback:
+            if stored.get('timeline'): fallback['rotation_archive']=stored
+            return JSONResponse(fallback)
         if stored.get('timeline'):
             return JSONResponse({'sectors':[], 'rotation':stored, 'historical_only':True,
                 'error':'今日板块接口不可用，仅能显示历史真实板块快照。'})
@@ -931,8 +963,8 @@ def capture_auction25(x_control_token:str|None=Header(None)):
     return JSONResponse(result)
 
 @app.post('/api/auction25/backfill')
-def auction25_backfill(trade_date:str|None=None,days:int=6,x_control_token:str|None=Header(None)):
-    _require_owner(x_control_token)
+def auction25_backfill(trade_date:str|None=None,days:int=6):
+    # 历史竞价补采只写入可重建的数据缓存，不修改用户配置；允许公开触发并由后台运行状态防重复。
     return JSONResponse(start_auction_backfill(DB_PATH,trade_date,max(2,min(8,days))))
 
 _news_api_cache={'data':None,'ts':0,'future':None}
@@ -962,12 +994,12 @@ def news_live():
     return JSONResponse(_get_cached_news())
 
 @app.get('/api/dragon-tiger')
-def dragon_tiger(trade_date:str|None=None):
+def dragon_tiger(trade_date:str|None=None, force:bool=False):
     # Cache on server (one request per trading date every 10 minutes max).
     day=trade_date or now_cn().date().isoformat()
     with _lock:
         cached=_dragon_cache.get(day)
-    if cached and time.time()-cached['ts']<600:return JSONResponse(cached['data'])
+    if cached and not force and time.time()-cached['ts']<600:return JSONResponse(cached['data'])
     data=fetch_dragons(day)
     with _lock:_dragon_cache[day]={'ts':time.time(),'data':data}
     return JSONResponse(data)
@@ -996,7 +1028,33 @@ def regenerate(kind:str,x_control_token:str|None=Header(None)):
 @app.get('/api/boards/explorer')
 def boards_explorer(category: str=Query('industry',pattern='^(industry|concept|hot|style|region)$'),
                     group: str='',limit:int=Query(100,ge=1,le=550)):
-    return JSONResponse(explore_boards(category=category,group=group,limit=limit))
+    out=explore_boards(category=category,group=group,limit=limit)
+    if not out.get('error'):
+        return JSONResponse(out)
+    # Prefer the latest actually archived board snapshot to an empty page when Eastmoney push2 is rate-limited.
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            row=conn.execute('SELECT MAX(trade_date) FROM sector_snapshots').fetchone(); day=(row or [None])[0]
+            if day:
+                q='SELECT board_code,board_name,heat,pct,breadth,main_net_pct,board_type FROM sector_snapshots WHERE trade_date=?'
+                vals=conn.execute(q,(day,)).fetchall()
+                arr=[]
+                for r in vals:
+                    typ=str(r[6] or '')
+                    if category in ('industry','concept') and typ and typ!=category: continue
+                    arr.append({'code':r[0],'name':r[1],'heat_score':r[2],'heat':r[2],'pct':r[3],'breadth':r[4],'main_net_pct':r[5],'type':typ or 'archived','archived':True})
+                arr.sort(key=lambda x:(x.get('heat') or -999),reverse=True)
+                if arr:
+                    return JSONResponse({'category':category,'group':group,'boards':arr[:limit],'total':len(arr),'source':'本站已保存的真实板块收盘快照','updated_at':day,'stale':True,'classification':'历史真实快照（当前实时板块源不可用）','source_error':out.get('error')})
+    except Exception: pass
+    if category=='hot':
+        fb=_sector_theme_fallback(min(limit,30))
+        if fb:
+            boards=[]
+            for x in fb.get('sectors') or []:
+                boards.append({'code':'','name':x.get('name'),'type':'theme','pct':None,'breadth':None,'main_net_pct':None,'heat_score':x.get('heat'),'heat':x.get('heat'),'leader_name':x.get('leader_name'),'theme_fallback':True})
+            return JSONResponse({'category':'hot','group':group,'boards':boards,'total':len(boards),'source':'真实涨停池题材聚合','updated_at':now_cn().date().isoformat(),'classification':'当前板块push2失败，使用真实涨停题材复盘，不展示资金字段','source_error':out.get('error')})
+    return JSONResponse(out)
 
 @app.get('/api/boards/explorer/rotation')
 def boards_rotation():
@@ -1050,6 +1108,39 @@ def factors_scan(inp:FactorRequest):
     result['universe']='用户输入' if inp.codes else '当前真实行情监控池（最多160只，并非全A）'
     return JSONResponse(result)
 
+_global_risk_cache={'ts':0.0,'data':None}
+@app.get('/api/global-risk')
+def global_risk():
+    now=time.time()
+    if _global_risk_cache.get('data') and now-_global_risk_cache.get('ts',0)<300:
+        return JSONResponse(_global_risk_cache['data'])
+    _harvest_refresh(); live=_live_cache.get('data') or {}
+    sent=(live.get('sentiment') or {})
+    out=build_global_risk(sent.get('score'),str(sent.get('stage') or ''))
+    _global_risk_cache.update(ts=now,data=out)
+    return JSONResponse(out)
+
+_intraday_cache={'ts':0.0,'data':None,'trade_date':None}
+@app.get('/api/intraday-1430')
+def intraday_1430():
+    _harvest_refresh();live=_live_cache.get('data') or {}
+    if not live or not live.get('is_live'):
+        _start_refresh(force=False);return JSONResponse({'picks':[],'loading':True,'note':'等待真实盘中行情'})
+    day=str(live.get('trade_date') or now_cn().date().isoformat())[:10];now=time.time()
+    if _intraday_cache.get('data') and _intraday_cache.get('trade_date')==day and now-_intraday_cache.get('ts',0)<180:
+        return JSONResponse({**_intraday_cache['data'],'cached':True})
+    with _close_review_lock:cr=_close_review_cache.get('data') or {}
+    if not cr.get('ok'):
+        try:cr=build_close_review()
+        except Exception:cr={}
+    from public_sources import fetch_history_df
+    out=build_intraday_picks(live,cr,fetch_history_df,lambda c:sector_context_for_stock(c,news=_get_cached_news()),limit=5)
+    out['updated_at']=datetime.now(CN_TZ).isoformat(timespec='seconds');out['trade_date']=day
+    hm=now_cn().hour*60+now_cn().minute
+    out['session']='尾盘窗口' if 14*60+20<=hm<=14*60+55 else '非14:20-14:55，仅按当前/收盘快照复盘'
+    _intraday_cache.update(ts=now,data=out,trade_date=day)
+    return JSONResponse(out)
+
 @app.get("/api/health")
 def health():
     db_ok = True
@@ -1062,7 +1153,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.12.1-auction-multisource",
+        "version": "6.13-review-role-intraday-risk",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

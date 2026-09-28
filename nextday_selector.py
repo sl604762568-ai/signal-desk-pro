@@ -14,6 +14,16 @@ def n(v,d=0.0):
 
 def clamp(v): return max(0,min(100,float(v)))
 
+def _chan_text(signals):
+    out=[]
+    for z in signals or []:
+        if isinstance(z,dict):
+            t=str(z.get("type") or "")
+            txt=str(z.get("text") or z.get("reason") or "")
+            out.append((t+("："+txt if txt else "")).strip("："))
+        else: out.append(str(z))
+    return "；".join(x for x in out if x)
+
 def band_score(x: float, lo: float, sweet_lo: float, sweet_hi: float, hi: float) -> float:
     """0-100 score that rewards being in a practical short-term band, not simply being larger."""
     if x <= 0: return 0.0
@@ -73,11 +83,13 @@ def _technical(df: pd.DataFrame) -> Dict[str,Any]:
     if 1.20<=vr<=2.60: score+=18; why.append(f"量比{vr:.2f}×")
     elif 1.05<=vr<1.20 or 2.60<vr<=3.20: score+=10
     elif vr>3.50: score+=4; risks.append("量能过热")
+    ret20=(price/n(x.close.iloc[-21])-1)*100 if len(x)>=21 and n(x.close.iloc[-21]) else 0
+    bias20=(price/ma20-1)*100 if ma20 else 0
     high20=n(x.high.tail(20).max()); low20=n(x.low.tail(20).min())
     if price>=high20*.965: score+=12; why.append("接近20日高位")
     pos=(price-low20)/max(1e-9,high20-low20) if high20>low20 else .5
     if .55<=pos<=.92: score+=6
-    return {"score":clamp(score),"why":why[:6],"risks":risks,"tech":{"ma5":round(ma5,2),"ma10":round(ma10,2),"ma20":round(ma20,2),"ma60":round(ma60,2),"dif":round(dif,4),"dea":round(dea,4),"macd":round(hist,4),"rsi14":round(rsi,1),"vol_ratio5":round(vr,2)}}
+    return {"score":clamp(score),"why":why[:6],"risks":risks,"tech":{"ma5":round(ma5,2),"ma10":round(ma10,2),"ma20":round(ma20,2),"ma60":round(ma60,2),"dif":round(dif,4),"dea":round(dea,4),"macd":round(hist,4),"rsi14":round(rsi,1),"vol_ratio5":round(vr,2),"ret20":round(ret20,2),"bias20":round(bias20,2)}}
 
 def _short_term_profile(s: Dict[str,Any], tech: Dict[str,Any]) -> Dict[str,Any]:
     price=n(s.get("price")); pct=n(s.get("pct")); tr=n(s.get("turnover_rate")); amt=n(s.get("amount"));
@@ -131,24 +143,33 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
     mscore=n((market.get("sentiment") or {}).get("score"),50)
     mstage=str((market.get("sentiment") or {}).get("stage","中性"))
     stocks=market.get("review_universe") or market.get("active_stocks") or []
-    stock_sector_map, hot_sectors, sector_error = _real_sector_membership(news, topn=4)
+    stock_sector_map, hot_sectors, sector_error = _real_sector_membership(news, topn=6)
+    close_review=market.get("close_review") or {}
+    rotation_states={str(x.get("theme") or ""):str(x.get("state") or "") for x in ((close_review.get("rotation3") or {}).get("transitions") or [])}
+    theme_rank={str(x.get("theme") or ""):max(0,100-i*8) for i,x in enumerate(close_review.get("theme_today") or [])}
+    role_themes={str(x.get("theme") or "") for x in (close_review.get("roles") or [])}
+    for th in role_themes: theme_rank[th]=max(theme_rank.get(th,0),82)
     market_gate = bool(mscore >= 55 and macro["score"] >= 43)
     pool=[]
     for s in stocks:
         code=str(s.get("code",'')).zfill(6); name=str(s.get("name",'')); price=n(s.get("price"))
         if len(code)!=6 or code.startswith("688") or "ST" in name.upper() or name.startswith("退"): continue
-        # 板块先行：真实板块成员映射可用时，只扫描高热板块的真实成分股。
-        if stock_sector_map and code not in stock_sector_map: continue
+        # 板块先行但不一票否决：高热板块优先，避免真实板块源偶发缺失时不足5只。
+        in_hot = (not stock_sector_map) or code in stock_sector_map
         # User's short-term preference: avoid very high-priced names, but price itself never gets a positive score.
         if price<=2.5 or price>80: continue
         pct=n(s.get("pct")); amt=n(s.get("amount")); tr=n(s.get("turnover_rate")); cap=n(s.get("float_market_cap"))/1e8
         if amt<8e7: continue
         if cap>0 and not (10<=cap<=320): continue
         # Pre-selection is banded, so huge turnover/amount no longer dominates.
-        sector_pre=max([n(x.get("heat"),50) for x in stock_sector_map.get(code,[])],default=50)
-        pre = band_score(amt/1e8,.8,2,18,45)*.24 + band_score(tr,1,4,16,28)*.28 + band_score(pct,-1,1,7,9.5)*.16 + (band_score(cap,10,25,120,320) if cap>0 else 55)*.12 + sector_pre*.20
+        sector_pre=max([n(x.get("heat"),50) for x in stock_sector_map.get(code,[])],default=42 if stock_sector_map else 50)
+        theme_boost=0
+        ind=str(s.get("industry") or "")
+        for th,state in rotation_states.items():
+            if th and (th in ind or ind in th): theme_boost=max(theme_boost,{"新发酵":20,"增强":18,"延续":12,"分歧":4,"退潮":-12}.get(state,0))
+        pre = band_score(amt/1e8,.8,2,18,45)*.22 + band_score(tr,1,4,16,28)*.24 + band_score(pct,-1,1,6.5,9.2)*.14 + (band_score(cap,10,25,120,320) if cap>0 else 55)*.10 + sector_pre*.22 + theme_boost + (4 if in_hot else -4)
         pool.append((pre,s))
-    pool=[s for _,s in sorted(pool,key=lambda z:z[0],reverse=True)[:28]]
+    pool=[s for _,s in sorted(pool,key=lambda z:z[0],reverse=True)[:56]]
 
     rows=[]
     with ThreadPoolExecutor(max_workers=4) as ex:
@@ -172,11 +193,26 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
         event=sector
         market_component=clamp(mscore*.72+macro["score"]*.28)
         # The next-day model now centers on sector/event + short-term elasticity + technical confirmation.
-        total=sector*.25 + st["score"]*.25 + tech["score"]*.30 + market_component*.20
+        # 三日题材轮动直接参与评分。
+        theme_state=""; theme_bonus=0
+        labels=[str(x.get("name") or "") for x in memberships]+[str(s.get("industry") or "")]
+        for th,state in rotation_states.items():
+            if th and any(th in z or z in th for z in labels if z):
+                b={"新发酵":14,"增强":13,"延续":9,"分歧":0,"退潮":-12}.get(state,0)
+                if b>theme_bonus: theme_bonus=b; theme_state=f"{th}·{state}"
+        for th,rank_score in theme_rank.items():
+            if th and any(th in z or z in th for z in labels if z):
+                b=rank_score*.10
+                if b>theme_bonus: theme_bonus=b; theme_state=theme_state or f"{th}·当日主线"
+        ret20=n((tech.get('tech') or {}).get('ret20')); bias20=n((tech.get('tech') or {}).get('bias20'))
+        extension_penalty=max(0,pct-6.5)*3.5 + max(0,ret20-22)*0.7 + max(0,bias20-10)*0.8
+        early_bonus=5 if -2<=ret20<=18 and -3<=bias20<=8 else 0
+        total=sector*.20 + st["score"]*.23 + tech["score"]*.27 + market_component*.16 + theme_bonus + early_bonus - extension_penalty
         risks=list(tech["risks"])+list(st["risks"])
         if macro["score"]<43: risks.append("海外/宏观事件风险偏高")
         if mscore<45: risks.append("A股市场情绪偏弱")
         if pct>8.0: risks.append("当日涨幅较大，次日追高风险高")
+        if ret20>22: risks.append(f"20日累计涨幅{ret20:.1f}%偏高，已降低优先级")
         analysis=analyze_stock(df,code=str(s.get("code",'')).zfill(6),name=str(s.get("name",'')),industry=str(s.get("industry",'')),event_hits=sector_why)
         picks.append({
             "code":str(s.get("code",'')).zfill(6),"name":s.get("name"),"industry":s.get("industry",''),
@@ -186,7 +222,11 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
             "sector_memberships":memberships[:5],"sector_name":(memberships[0].get("name") if memberships else str(s.get("industry",''))),
             "volume_price_score":round(st["score"],1),"short_term_elasticity":round(st["score"],1),"technical_score":round(tech["score"],1),
             "execution_state":"正式观察" if market_gate else "观察池",
-            "technical":tech["tech"],"reasons":sector_why+st["why"]+tech["why"],"risks":list(dict.fromkeys(risks))[:5],
+            "technical":tech["tech"],"reasons":([f"三日题材：{theme_state}"] if theme_state else [])+sector_why+st["why"]+tech["why"],"risks":list(dict.fromkeys(risks))[:5],
+            "theme_context":theme_state or "未命中三日题材主线，依赖板块/量价独立验证",
+            "detailed_reason":f"题材/板块{sector:.0f}分，短线弹性{st['score']:.0f}分，技术面{tech['score']:.0f}分，市场环境{market_component:.0f}分。" + (f" 三日轮动命中{theme_state}。" if theme_state else ""),
+            "technical_context":"；".join(tech["why"][:4]) or "技术面等待更多确认",
+            "chan_context":_chan_text((analysis.get("chan") or {}).get("signals",[])[:3]) or "暂无明确二/三买标记",
             "support":analysis.get("support"),"resistance":analysis.get("resistance"),"chan_signals":(analysis.get("chan") or {}).get("signals",[])
         })
     # Do not use amount as a tie-breaker anymore; favor elasticity and technical confirmation.
@@ -198,6 +238,14 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
         industries[ind]=industries.get(ind,0)+1
         out.append(p)
         if len(out)>=limit: break
+    if len(out)<limit:
+        existing={x["code"] for x in out}
+        for p in picks:
+            if p["code"] in existing:continue
+            p["secondary_fill"]=True
+            p["risks"]=list(dict.fromkeys((p.get("risks") or [])+["用于补足5只观察池，题材集中度/板块共振弱于前排"]))[:5]
+            out.append(p);existing.add(p["code"])
+            if len(out)>=limit:break
     for i,p in enumerate(out,1): p["rank"]=i
     env={"market_score":round(mscore,1),"market_stage":mstage,"macro":macro,
          "mkt_gate":market_gate,

@@ -1,3 +1,5 @@
+**最新扩展：v6.13 复盘角色族谱 + 龙虎榜席位 + 14:30尾盘 + VIX/VXN，详见 [README_V6_13.md](README_V6_13.md)。**
+
 **最新扩展：v6.12 板块行情终端 + 单项/组合选股，详见 [README_V6_12.md](README_V6_12.md) 和 [DEPLOY_V6_12.md](DEPLOY_V6_12.md)。**
 
 # Signal Desk Pro v6.11.2
