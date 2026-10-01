@@ -47,7 +47,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.13-review-role-intraday-risk")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.14-multipage-workbench")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -352,6 +352,12 @@ def _startup():
 
 @app.get("/")
 def index(): return FileResponse(STATIC/"index.html")
+
+# Multi-page workbench routes. They share one shell so the existing JS/API logic remains compatible,
+# while each URL exposes only the modules relevant to that task.
+for _page in ("market", "emotion", "dragon", "auction", "sector", "stocks", "intel", "tools"):
+    app.add_api_route(f"/{_page}", lambda: FileResponse(STATIC/"index.html"), methods=["GET"], include_in_schema=False)
+
 @app.get("/manifest.webmanifest")
 def manifest(): return FileResponse(STATIC/"manifest.webmanifest")
 @app.get("/sw.js")
@@ -1153,7 +1159,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.13-review-role-intraday-risk",
+        "version": "6.14-multipage-workbench",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},

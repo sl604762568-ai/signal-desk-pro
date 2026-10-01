@@ -45,11 +45,28 @@
 @media(max-width:900px){.riskGrid{grid-template-columns:repeat(2,1fr)}.geneGrid{grid-template-columns:repeat(2,1fr)}.intradayGrid{grid-template-columns:1fr}}
 @media(max-width:520px){.riskGrid,.geneGrid{grid-template-columns:1fr 1fr}}
 </style>
+
+<style id="multiPageShell">
+.pageIntro{margin:14px 0 12px;background:linear-gradient(135deg,rgba(32,43,72,.82),rgba(13,18,29,.96))}.pageTitle{font-size:24px;font-weight:900;margin:5px 0}.pageDesc{font-size:12px;color:#91a0b4;line-height:1.65}.page-hidden{display:none!important}.nav a.active{color:#fff;border-color:#6f63ff;background:linear-gradient(135deg,#30286e,#18335c)}
+@media(min-width:1000px){body.multiPage .app{max-width:none;padding-left:226px;padding-right:22px}body.multiPage .top{margin-left:-226px;margin-right:-22px;padding-left:244px}body.multiPage .topIn{max-width:none}.nav{position:fixed;left:14px;top:76px;bottom:14px;width:190px;z-index:35;display:flex;flex-direction:column;gap:7px;margin:0;padding:12px;border:1px solid #202b3c;border-radius:16px;background:rgba(9,13,20,.94);backdrop-filter:blur(16px);overflow:auto}.nav:before{content:'工作台';font-size:10px;color:#63738a;letter-spacing:1.5px;font-weight:800;padding:3px 5px 7px}.nav a{border-radius:10px;padding:11px 12px}}
+@media(max-width:999px){.pageIntro{margin-top:10px}}
+@media(max-width:620px){.pageIntro{margin:9px 0}.pageTitle{font-size:20px}.pageDesc{font-size:11px}.bottomNav a.active{color:#fff;background:#182236;border-radius:10px}.bottomNav a.active b{color:#9ca8ff}}
+</style>
 </head>
 <body>
 <div class="app">
-<header class="top"><div class="topIn"><div class="brandWrap"><div class="logo">S</div><div class="brand">SIGNAL DESK PRO<small>收盘复盘 × 题材轮动 × 明日5股 × 单股诊断</small></div></div><div class="topActions"><span class="pill" id="livePill"><span class="dot"></span>数据加载中</span><span class="pill" id="timePill">--</span><button class="btn primary" onclick="loadDashboard(true)">刷新</button></div></div></header>
-<nav class="nav"><a href="#closereview">收盘复盘</a><a href="#global-risk">VIX/VXN</a><a href="#dragon">龙虎榜资金</a><a href="#auction">9:25竞价</a><a href="#next5">明日5股</a><a href="#intraday1430">14:30尾盘</a><a href="#watchlist">自选股</a><a href="#stocklab">单股分析</a><a href="#sector-terminal">板块行情</a><a href="#sectorreview">板块复盘</a><a href="#reviewpick">AI复盘</a><a href="#factor-terminal">单项/组合选股</a><a href="#candidates">技术选股</a><a href="#hotspot">信息面</a><a href="#paper">自动回测</a></nav>
+<header class="top"><div class="topIn"><div class="brandWrap"><div class="logo">S</div><div class="brand">SIGNAL DESK PRO<small>多页面短线工作台 × 统一数据底座 × 真实源优先</small></div></div><div class="topActions"><span class="pill" id="livePill"><span class="dot"></span>数据加载中</span><span class="pill" id="timePill">--</span><button class="btn primary" onclick="loadDashboard(true)">刷新</button></div></div></header>
+<nav class="nav" id="mainNav">
+<a data-route="market" href="/market">🏠 今日市场</a>
+<a data-route="emotion" href="/emotion">🔥 情绪周期</a>
+<a data-route="dragon" href="/dragon">🐉 龙虎榜</a>
+<a data-route="auction" href="/auction">🌅 竞价中心</a>
+<a data-route="sector" href="/sector">🚀 题材板块</a>
+<a data-route="stocks" href="/stocks">🎯 个股与选股</a>
+<a data-route="intel" href="/intel">📰 情报中心</a>
+<a data-route="tools" href="/tools">🧪 回测工具</a>
+</nav>
+<div class="pageIntro panel pad" id="pageIntro"><div class="eyebrow" id="pageEyebrow">SIGNAL DESK PRO</div><div class="pageTitle" id="pageTitle">今日市场</div><div class="pageDesc" id="pageDesc">收盘复盘、连板梯队、题材轮动与次日研究计划。</div></div>
 
 <section class="hero" id="overview">
   <div class="panel pad"><div class="eyebrow">FROM FACT → CAPITAL → PRICE</div><div class="heroTitle">收盘复盘，走到<span>明日交易计划</span></div><div class="desc">以涨停梯队、三日题材轮动、资金角色和市场情绪为复盘主轴，再联动信息面、量价、MACD/均线与缠论结构生成明日研究候选。</div><div class="flow"><span>涨停梯队</span><i>→</i><span>三日题材轮动</span><i>→</i><span>资金角色</span><i>→</i><span>市场情绪</span><i>→</i><span>技术/缠论</span><i>→</i><span>明日5股</span></div></div>
@@ -182,7 +199,7 @@
 
 
 
-<section class="section" id="sentiment" style="display:none"><div class="secHead"><div><h2>市场情绪与接力生态</h2><p>先判断今天适不适合做短线，再看个股。</p></div><span class="label" id="marketSource">--</span></div>
+<section class="section" id="sentiment"><div class="secHead"><div><h2>市场情绪与接力生态</h2><p>先判断今天适不适合做短线，再看个股。</p></div><span class="label" id="marketSource">--</span></div>
 <div class="grid">
   <div class="panel pad c3"><div class="label">涨停 / 跌停</div><div class="metric"><span class="red" id="zt">--</span><span style="font-size:15px;color:#536177"> / </span><span class="green" id="dt">--</span></div><div class="label">炸板 <span id="zb">--</span> 家</div></div>
   <div class="panel pad c3"><div class="label">封板率</div><div class="metric" id="seal">--</div><div class="label" id="sealText">封板质量</div></div>
@@ -312,7 +329,7 @@
 <div class="footer">本工具以收盘复盘、三日题材轮动、明日5股与单股研究为核心；自动回测仅用于验证策略。关键市场数据未校验通过时不发布推断值。</div>
 </div>
 
-<div class="bottomNav"><a href="#closereview"><b>复</b>复盘</a><a href="#next5"><b>⑤</b>明日</a><a href="#stocklab"><b>⌕</b>单股</a><a href="#candidates"><b>选</b>选股</a><a href="#paper"><b>测</b>回测</a></div>
+<div class="bottomNav"><a data-route="market" href="/market"><b>盘</b>市场</a><a data-route="sector" href="/sector"><b>题</b>题材</a><a data-route="stocks" href="/stocks"><b>选</b>选股</a><a data-route="intel" href="/intel"><b>讯</b>情报</a><a data-route="tools" href="/tools"><b>具</b>更多</a></div>
 <div class="modal" id="modal" onclick="if(event.target===this)closeModal()"><div class="modalBox"><div class="modalHead"><div><b id="modalTitle">个股量价详情</b><div class="label" id="modalSub">近70个交易日 · 前复权</div></div><button class="close" onclick="closeModal()">关闭</button></div><div class="pad"><div id="kchart" class="kchart"></div></div></div></div>
 
 <script>
@@ -488,7 +505,7 @@ async function loadDashboard(fresh=false){
       else $('livePill').title=d.refresh_status?.error||'真实市场快照尚未就绪';
       return;
     }
-    renderAll(d);if(!demoMode)setTimeout(loadStandaloneNews,100);
+    renderAll(d);if(!demoMode && (typeof ACTIVE_PAGE==='undefined'||ACTIVE_PAGE==='intel'))setTimeout(loadStandaloneNews,100);
     if(d.source_errors?.length){$('livePill').title='部分数据源失败：'+d.source_errors.join(' / ')}
     if(!demoMode && !d.is_live){
       const rs=d.refresh_status||{};
@@ -688,15 +705,35 @@ function renderIntradayCard(x,i){return `<div class="nextCard" onclick="analyzeS
 async function loadIntraday1430(){try{$('intradayState').textContent='正在读取真实盘中行情、题材角色与技术结构…';let r=await fetch('/api/intraday-1430',{cache:'no-store'}),d=await r.json();if(d.loading){$('intradayState').textContent=d.note||'等待真实盘中行情';return}$('intradayState').textContent=`${d.session||'尾盘复盘'} · ${d.updated_at||''} · 共${(d.picks||[]).length}只研究候选；未涨停与“有空间”仅是筛选条件，不代表次日上涨。`;$('intradayGrid').innerHTML=(d.picks||[]).length?(d.picks||[]).map(renderIntradayCard).join(''):'<div class="emptyState" style="grid-column:1/-1">当前真实行情与题材/技术条件下没有筛出5只，不用模拟股票补足。</div>'}catch(e){$('intradayState').textContent='尾盘复盘接口暂不可用：'+e.message}}
 function maybeAutoIntraday(){try{let parts=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date());let h=Number(parts.find(x=>x.type==='hour')?.value||0),m=Number(parts.find(x=>x.type==='minute')?.value||0),hm=h*60+m;if(hm>=14*60+20&&hm<=14*60+55&&!window.__intradayAutoTs){window.__intradayAutoTs=Date.now();loadIntraday1430()}}catch(e){}}
 setInterval(maybeAutoIntraday,120000);maybeAutoIntraday();
-initCharts();loadDashboard();setTimeout(loadTerminalRotation,6500);
-// 避免首次加载瞬间并发拉满免费服务器：复盘优先，其余模块错峰启动。
-setTimeout(()=>loadCloseReview(false),1800);
-setTimeout(()=>loadGlobalRisk(),8500);
-setTimeout(()=>loadDragon(),11000);
-setTimeout(()=>loadSectorReview(false),14000);
-setTimeout(()=>loadWatchlist(),17000);
-setTimeout(()=>loadAuction(),21000);
-setTimeout(()=>loadAuctionTopics(),24000);
-setTimeout(()=>loadPaper(),27000);setInterval(()=>{if(!demoMode)loadDashboard(false)},90000);setInterval(()=>{if($('paperAuto')?.checked)runPaperEngine(true)},60000);if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+
+const PAGE_CONFIG={
+ market:{title:'今日市场',eyebrow:'MARKET WORKBENCH',desc:'收盘核心复盘、连板梯队、三日题材轮动、次日5股与14:30尾盘研究。',sections:['overview','closereview','next5','intraday1430']},
+ emotion:{title:'情绪周期',eyebrow:'SENTIMENT CYCLE',desc:'涨停/炸板/跌停、封板率、晋级生态、市场广度与情绪阶段。',sections:['overview','sentiment','global-risk']},
+ dragon:{title:'龙虎榜与龙种',eyebrow:'DRAGON & SEATS',desc:'公开龙虎榜、席位资金动向与核心资金角色核验。',sections:['dragon']},
+ auction:{title:'9:25 竞价中心',eyebrow:'OPENING AUCTION',desc:'真实竞价快照、历史补采、题材强弱与竞价研究结果。',sections:['auction']},
+ sector:{title:'题材与板块中心',eyebrow:'SECTOR ROTATION',desc:'行业、概念、风格、地域、热点板块与三日轮动结构。',sections:['sector-terminal','sectorreview']},
+ stocks:{title:'个股与选股中心',eyebrow:'STOCK RESEARCH',desc:'自选股、单股诊断、AI复盘、单项/组合选股与历史股性扫描。',sections:['watchlist','stocklab','reviewpick','factor-terminal','candidates']},
+ intel:{title:'市场情报中心',eyebrow:'INTELLIGENCE',desc:'热点链路、实时财经新闻与海外风险环境，信息与行情分层验证。',sections:['hotspot','news','global-risk']},
+ tools:{title:'策略与回测工具',eyebrow:'RESEARCH TOOLS',desc:'虚拟盘、自动纸面交易与策略周期回测。',sections:['paper']}
+};
+function currentPage(){let k=location.pathname.replace(/^\/+|\/+$/g,'')||'market';return PAGE_CONFIG[k]?k:'market'}
+function applyPageShell(){document.body.classList.add('multiPage');const key=currentPage(),cfg=PAGE_CONFIG[key];$('pageTitle').textContent=cfg.title;$('pageEyebrow').textContent=cfg.eyebrow;$('pageDesc').textContent=cfg.desc;document.title=cfg.title+' · Signal Desk Pro';document.querySelectorAll('section.section,.hero').forEach(el=>el.classList.toggle('page-hidden',!cfg.sections.includes(el.id)));document.querySelectorAll('[data-route]').forEach(a=>a.classList.toggle('active',a.dataset.route===key));return key}
+const ACTIVE_PAGE=applyPageShell();
+function startActivePage(){
+ initCharts();loadDashboard();
+ if(ACTIVE_PAGE==='market'){setTimeout(()=>loadCloseReview(false),1500);setTimeout(()=>loadIntraday1430(),5200)}
+ if(ACTIVE_PAGE==='emotion'){setTimeout(()=>loadGlobalRisk(),2200)}
+ if(ACTIVE_PAGE==='dragon'){setTimeout(()=>loadDragon(),800)}
+ if(ACTIVE_PAGE==='auction'){setTimeout(()=>loadAuction(),800);setTimeout(()=>loadAuctionTopics(),2500)}
+ if(ACTIVE_PAGE==='sector'){setTimeout(()=>loadSectorReview(false),900);setTimeout(()=>loadTerminalRotation(),2300)}
+ if(ACTIVE_PAGE==='stocks'){setTimeout(()=>loadWatchlist(),900)}
+ if(ACTIVE_PAGE==='intel'){setTimeout(()=>loadGlobalRisk(),1800);setTimeout(()=>loadStandaloneNews(),2500)}
+ if(ACTIVE_PAGE==='tools'){setTimeout(()=>loadPaper(),900)}
+}
+startActivePage();
+// 多页面模式只加载当前页面需要的重型接口；基础市场快照仍每90秒刷新。
+setInterval(()=>{if(!demoMode)loadDashboard(false)},90000);
+if(ACTIVE_PAGE==='tools')setInterval(()=>{if($('paperAuto')?.checked)runPaperEngine(true)},60000);
+if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 </body></html>
