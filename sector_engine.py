@@ -23,8 +23,8 @@ EM_CLIST_HOSTS = [
 EM_STOCK = "https://push2.eastmoney.com/api/qt/stock/get"
 EM_SLIST = "https://push2.eastmoney.com/api/qt/slist/get"
 EM_KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-TIMEOUT = 2.5
-CACHE_SECONDS = 180
+TIMEOUT = 4.5
+CACHE_SECONDS = 240
 
 _cache_lock = threading.Lock()
 _cache: Dict[str, Tuple[float, Any]] = {}

@@ -50,19 +50,34 @@ def macro_context(news: Dict[str,Any]) -> Dict[str,Any]:
     return {"score":round(score,1),"level":level,"hits":hits[:6],"note":"宏观/海外风险由财经新闻事件代理识别，不等同于实时美股指数、美元或利率报价。"}
 
 def sector_score(s: Dict[str,Any], market: Dict[str,Any], news: Dict[str,Any]) -> tuple[float,List[str]]:
-    industry=str(s.get("industry",'')); name=str(s.get("name",'')); score=35.0; why=[]
-    for th in (market.get("themes") or [])[:16]:
+    industry=str(s.get("industry",'')); name=str(s.get("name",'')); code=str(s.get("code",'')).zfill(6)
+    score=32.0; why=[]; labels=[industry]
+    try:
+        from sector_engine import fetch_stock_sector_info
+        info=fetch_stock_sector_info(code) if code and len(code)==6 else {}
+        labels += [str(x.get("name") or "") for x in (info.get("concepts") or [])[:12]]
+        if info.get("industry") and info.get("industry") not in labels: labels.append(str(info.get("industry")))
+    except Exception:
+        info={}
+    labels=[x for x in labels if x]
+    for th in (market.get("themes") or [])[:18]:
         tn=str(th.get("name",'')); ts=n(th.get("score"),50)
-        if tn and (tn in industry or industry in tn):
+        if tn and any(tn in lb or lb in tn for lb in labels):
             score=max(score,ts); why.append(f"板块{tn}强度{ts:.0f}")
-    for c in (news.get("clusters") or [])[:14]:
+    alias_map={"AI算力":["通信","电子","计算机","CPO","液冷服务器","PCB","光模块"],"机器人":["机械","自动化","机器人","电机","减速器"],"电力电网":["电力","电力设备","电网","储能"],"有色资源":["有色","贵金属","小金属","矿业","稀土"],"医药":["医药","创新药","医疗","生物"],"消费电子":["消费电子","苹果","PCB","芯片"]}
+    for c in (news.get("clusters") or [])[:18]:
         topic=str(c.get("topic",'')); heat=n(c.get("heat")); direction=str(c.get("direction",''))
-        aliases={"AI算力":["通信","电子","计算机","CPO"],"机器人":["机械","自动化","机器人","电机"],"电力电网":["电力","电力设备","电网"],"有色资源":["有色","贵金属","小金属","矿业"]}.get(topic,[])
-        if topic in industry or any(a in industry for a in aliases):
-            adj=heat + (5 if direction=="偏正" else -7 if direction=="偏负" else 0)
-            score=max(score,adj); why.append(f"{topic}新闻热度{heat:.0f}·{direction}")
-    direct=[x for x in (news.get("items") or [])[:120] if name and name in str(x.get("title",''))]
-    if direct: score=max(score,82+min(12,len(direct)*3)); why.append(f"新闻直接提及{len(direct)}次")
+        aliases=alias_map.get(topic,[])
+        if topic and any(topic in lb or lb in topic or any(a in lb for a in aliases) for lb in labels):
+            adj=heat + (8 if direction=="偏正" else -6 if direction=="偏负" else 0)
+            score=max(score,adj); why.append(f"{topic}热度{heat:.0f}·{direction or '中性'}")
+    direct=[x for x in (news.get("items") or [])[:140] if (name and name in str(x.get("title",''))) or any(lb and lb in str(x.get("title",'')) for lb in labels[:6])]
+    if direct:
+        score=max(score,72+min(18,len(direct)*2.5))
+        why.append(f"新闻/题材直接关联{len(direct)}次")
+    if not why and labels:
+        why.append('未命中当日主线，暂按板块/概念常规相关性估分')
+        score=max(score,45)
     return clamp(score),why[:3]
 
 def _technical(df: pd.DataFrame) -> Dict[str,Any]:

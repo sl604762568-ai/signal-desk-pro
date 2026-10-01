@@ -47,7 +47,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE / "sentiment.db"))
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "75"))
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
-app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.14-multipage-workbench")
+app = FastAPI(title="热点链路 × A股短线量价工作台", version="6.19-data-repair")
 app.add_middleware(GZipMiddleware, minimum_size=700)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache: Dict[str, Any] = {"ts": 0.0, "data": None, "mode": None}
@@ -1186,7 +1186,7 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.17-confidence-radar",
+        "version": "6.19-data-repair",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
