@@ -296,7 +296,7 @@ def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], history_fet
                 "code": code, "name": s.get("name"), "industry": s.get("industry", ""),
                 "price": n(s.get("price")), "pct": n(s.get("pct")), "amount": n(s.get("amount")),
                 "turnover_rate": n(s.get("turnover_rate")), "volume_ratio": n(s.get("volume_ratio")),
-                "strategy": strategy, "score": round(score, 1),
+                "strategy": strategy, "score": round(score, 1), "confidence_score": round(score,1), "confidence_level": ("高置信候选" if score>=75 else "观察区" if score>=60 else "暂缓区"),
                 "reasons": sig["reasons"] + topic_why,
                 "risks": risks or ["次日仍需核对指数、板块强弱与开盘位置"],
                 "metrics": {k: sig[k] for k in ["day_ret", "ret20", "ma5", "ma10", "ma20", "ma60", "vol_ratio5", "bias20", "near60"]},
@@ -309,7 +309,7 @@ def build_review_picks(market: Dict[str, Any], news: Dict[str, Any], history_fet
             chan.append({
                 "code":code,"name":s.get("name"),"industry":s.get("industry",""),"price":n(s.get("price")),"pct":n(s.get("pct")),
                 "amount":n(s.get("amount")),"turnover_rate":n(s.get("turnover_rate")),"volume_ratio":n(s.get("volume_ratio")),
-                "chan_type":cs["type"],"score":round(score,1),"reasons":cs["reasons"]+topic_why,
+                "chan_type":cs["type"],"score":round(score,1),"confidence_score":round(score,1),"confidence_level": ("高置信候选" if score>=75 else "观察区" if score>=60 else "暂缓区"),"reasons":cs["reasons"]+topic_why,
                 "risks":cs["risks"]+(["当前市场偏弱，结构信号仅作观察"] if regime["level"]=="弱" else []),"metrics":cs["metrics"]
             })
 

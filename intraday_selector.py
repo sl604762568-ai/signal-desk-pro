@@ -89,7 +89,7 @@ def build_intraday_picks(market:Dict[str,Any], close_review:Dict[str,Any], histo
         if pct>7.5:total-=12;risks.append('当日涨幅偏高，尾盘追价空间较小')
         analysis=analyze_stock(df,code=code,name=str(s.get('name','')),industry=str(s.get('industry','')),event_hits=reasons[:3])
         out.append({'code':code,'name':s.get('name'),'industry':s.get('industry',''),'price':n(s.get('price')),'pct':pct,'turnover_rate':tr,'volume_ratio':vr,'amount_yi':round(amt,2),
-                    'score':round(clamp(total),1),'theme':theme_hit or (themes[0] if themes else str(s.get('industry',''))),'theme_score':round(theme_score,1),'technical_score':round(technical,1),
+                    'score':round(clamp(total),1),'confidence_score':round(clamp(total),1),'confidence_level':('高置信候选' if clamp(total)>=75 else '观察区' if clamp(total)>=60 else '暂缓区'),'theme':theme_hit or (themes[0] if themes else str(s.get('industry',''))),'theme_score':round(theme_score,1),'technical_score':round(technical,1),
                     'reasons':reasons[:6],'risks':risks[:4],'support':analysis.get('support'),'resistance':analysis.get('resistance'),'chan_signals':(analysis.get('chan') or {}).get('signals',[]),
                     'theme_context':(f'{theme_hit}进入三日轮动活跃链' if theme_hit else (' / '.join(themes[:3]) if themes else str(s.get('industry','')))),
                     'technical_context':f'MA5 {ma5:.2f} / MA10 {ma10:.2f} / MA20 {ma20:.2f}；MACD DIF {dif:.3f} / DEA {dea:.3f}；偏离MA20 {bias:.1f}%',

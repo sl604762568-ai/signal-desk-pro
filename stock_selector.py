@@ -111,7 +111,7 @@ def build_candidates(market:Dict[str,Any],news:Dict[str,Any],hotspot:Dict[str,An
     for i,item in enumerate(top[:limit],1):
         board=board_by.get(item["code"]); item["rank"]=i; item["bucket"]=_bucket(item,board)
         h=item.get("history") or {}; item["trend_text"]=("多头排列" if h.get("trend_level",0)>=3 else "趋势改善" if h.get("trend_level",0)>=2 else "趋势待确认") if h else "等待日线核验"
-        item["label"]="重点研究" if item["score"]>=78 else "跟踪" if item["score"]>=68 else "观察"
+        item["label"]="高置信候选" if item["score"]>=75 else "观察区" if item["score"]>=60 else "暂缓区"; item["confidence_score"]=item["score"]; item["confidence_level"]=item["label"]
         item["reason"]="；".join(item["signals"][:4]) or "量价与热点综合筛选"
         item["risk_text"]="；".join(list(dict.fromkeys(item["risks"]))[:3]) or "暂无明显结构性风险标签"
     return top[:limit]

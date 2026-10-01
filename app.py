@@ -461,33 +461,53 @@ def close_review(fresh: bool = False):
                          "elapsed_seconds": 0})
 
 
+# v6.15: review scan runs in a background worker so the HTTP request returns immediately.
+_review_pick_lock = threading.RLock()
+_review_pick_cache: Dict[str, Any] = {"ts": 0.0, "data": None, "trade_date": None}
+_review_pick_state: Dict[str, Any] = {"running": False, "started": 0.0, "error": None}
+
+def _review_pick_worker(data: Dict[str, Any], news: Dict[str, Any], trade_date: str, limit: int) -> None:
+    try:
+        from public_sources import fetch_history_df
+        result=build_review_picks(data, news, history_fetcher=fetch_history_df, limit=limit)
+        result["trade_date"]=trade_date
+        result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
+        if now_cn().hour>=15 and trade_date==now_cn().date().isoformat() and not result.get("error"):
+            freeze_put(trade_date,'review',result)
+            result=freeze_get(trade_date,'review') or result
+        with _review_pick_lock:
+            _review_pick_cache.update(ts=time.time(),data=result,trade_date=trade_date)
+            _review_pick_state.update(running=False,error=result.get("error"))
+    except Exception as exc:
+        with _review_pick_lock:
+            _review_pick_state.update(running=False,error=f"{type(exc).__name__}: {exc}")
+
 @app.get("/api/review-picks")
 def review_picks(mode: str=Query("auto",pattern="^(auto|demo)$"), limit: int=Query(10,ge=3,le=20)):
     today=now_cn().date().isoformat()
     frozen=freeze_get(today,'review')
-    if frozen and mode!='demo':return JSONResponse(frozen)
+    if frozen and mode!='demo': return JSONResponse(frozen)
     if mode!='demo' and now_cn().hour<15:
         archived=freeze_latest('review',today)
         if archived:return JSONResponse({**archived,'note':'显示最近一次真实收盘固定复盘，盘中刷新不重新选股'})
-    if mode == "demo":
-        return JSONResponse({"regime": {"level":"--","score":0,"note":"演示模式不输出虚构复盘个股"}, "picks":[], "chan_picks":[], "scanned":0, "error":"请切换实时模式后执行复盘。"})
-    _harvest_refresh()
-    data=_live_cache.get("data")
+    if mode=='demo':
+        return JSONResponse({"regime":{"level":"--","score":0,"note":"演示模式不输出虚构复盘个股"},"picks":[],"chan_picks":[],"scanned":0,"error":"请切换实时模式后执行复盘。"})
+    _harvest_refresh(); data=_live_cache.get("data")
     if not data:
         _start_refresh(force=False)
-        return JSONResponse({"regime": {"level":"--","score":0,"note":"真实行情正在后台刷新"}, "picks":[], "chan_picks":[], "scanned":0, "error":"真实行情尚未准备好，请等待数据源状态变为实时后再点一次。"})
-    try:
-        from public_sources import fetch_history_df
+        return JSONResponse({"loading":True,"state":"waiting_market","regime":{},"picks":[],"chan_picks":[],"scanned":0,"note":"真实行情正在后台刷新"})
+    trade_date=str(data.get("trade_date") or today)[:10]
+    with _review_pick_lock:
+        cached=_review_pick_cache.get("data"); age=time.time()-float(_review_pick_cache.get("ts") or 0)
+        if cached and _review_pick_cache.get("trade_date")==trade_date and age<1800:
+            return JSONResponse({**cached,"cached":True,"cache_age_seconds":round(age,1)})
+        if _review_pick_state.get("running"):
+            elapsed=time.time()-float(_review_pick_state.get("started") or time.time())
+            return JSONResponse({"loading":True,"state":"scanning","elapsed_seconds":round(elapsed,1),"regime":{},"picks":[],"chan_picks":[],"scanned":0,"note":"历史K线与缠论结构正在后台并发扫描，页面无需保持阻塞。"})
+        _review_pick_state.update(running=True,started=time.time(),error=None)
         news=_get_cached_news()
-        result=build_review_picks(data, news, history_fetcher=fetch_history_df, limit=limit)
-        result["trade_date"]=data.get("trade_date")
-        if now_cn().hour>=15 and str(data.get('trade_date') or '').replace('-','')[:8]==today.replace('-',''):
-            freeze_put(today,'review',result)
-            result=freeze_get(today,'review') or result
-        result["updated_at"]=datetime.now(CN_TZ).isoformat(timespec="seconds")
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"regime":{},"picks":[],"chan_picks":[],"scanned":0,"error":f"复盘选股失败：{type(exc).__name__}: {exc}"})
+        threading.Thread(target=_review_pick_worker,args=(dict(data),news,trade_date,limit),daemon=True,name="review-pick-worker").start()
+    return JSONResponse({"loading":True,"state":"started","elapsed_seconds":0,"regime":{},"picks":[],"chan_picks":[],"scanned":0,"note":"复盘扫描已转入后台任务。"})
 
 @app.get("/api/stock/{code}")
 def stock_detail(code: str):
@@ -625,9 +645,16 @@ def analyze_one(code: str):
         from public_sources import fetch_history_df
         df, source=fetch_history_df(code, 180)
         sent=data.get("sentiment") or {}
+        market_context={
+            "score":sent.get("score"), "stage":sent.get("stage"),
+            "up_count":data.get("up_count"), "down_count":data.get("down_count"),
+            "seal_rate":data.get("seal_rate"), "max_board":data.get("max_board"),
+            "yesterday_premium":data.get("yesterday_premium"),
+        }
         result=analyze_stock(
             df, code=code, name=name, industry=industry, event_hits=event_hits,
             market_score=sent.get("score"), market_stage=str(sent.get("stage", "")),
+            market_context=market_context, sector_relations=relation.get("memberships") or [],
         )
         result["source"]=source
         result["snapshot"]={k:info.get(k) for k in ["price","pct","amount","turnover_rate","volume_ratio","high","low","open","prev_close","market_cap","float_market_cap"]} if info else {}
@@ -1159,12 +1186,13 @@ def health():
         db_error = f"{type(exc).__name__}: {exc}"
     return {
         "ok": db_ok,
-        "version": "6.14-multipage-workbench",
+        "version": "6.16-confidence-index",
         "time": datetime.now(CN_TZ).isoformat(timespec="seconds"),
         "cache_seconds": CACHE_SECONDS,
         "db": {"ok": db_ok, "path": str(DB_PATH), "error": db_error},
         "refresh": _refresh_meta(),
         "next5": {"running": bool(_next5_state["running"]), "error": _next5_state["error"], "has_cache": bool(_next5_cache["data"])},
+        "review_pick": {"running": bool(_review_pick_state["running"]), "error": _review_pick_state["error"], "has_cache": bool(_review_pick_cache["data"])},
         "sector_review": {"running": _sector_last.get("future") is not None, "error": _sector_last.get("error"), "has_cache": bool(_sector_last.get("data"))},
         "close_review": {"running": bool(_close_review_state["running"]), "last_error": _close_review_state["error"], "attempt": _close_review_state["attempt"], "has_cache": _close_review_cache["data"] is not None},
     }

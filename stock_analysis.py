@@ -26,20 +26,59 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
 
 
 def enrich_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a compact but broad technical indicator set used by both screening and stock detail.
+
+    Indicators are descriptive research features, not standalone trading instructions.
+    """
     x = df.copy().reset_index(drop=True)
     for c in ["open", "close", "high", "low", "volume", "amount"]:
         x[c] = pd.to_numeric(x.get(c), errors="coerce").fillna(0.0)
-    close = x["close"]
+    close, high, low, volume = x["close"], x["high"], x["low"], x["volume"]
     for p in (5, 10, 20, 60):
         x[f"ma{p}"] = close.rolling(p).mean()
-    dif = _ema(close, 12) - _ema(close, 26)
-    dea = _ema(dif, 9)
-    x["dif"] = dif
-    x["dea"] = dea
-    x["macd"] = (dif - dea) * 2
+    x["ema12"] = _ema(close, 12); x["ema26"] = _ema(close, 26)
+    dif = x["ema12"] - x["ema26"]; dea = _ema(dif, 9)
+    x["dif"] = dif; x["dea"] = dea; x["macd"] = (dif - dea) * 2
     x["rsi14"] = _rsi(close, 14)
-    x["vol_ma5"] = x["volume"].rolling(5).mean()
-    x["vol_ratio5"] = x["volume"] / x["vol_ma5"].replace(0, pd.NA)
+    # BOLL
+    x["boll_mid"] = close.rolling(20).mean()
+    boll_std = close.rolling(20).std(ddof=0)
+    x["boll_up"] = x["boll_mid"] + 2 * boll_std; x["boll_low"] = x["boll_mid"] - 2 * boll_std
+    x["boll_width"] = (x["boll_up"] - x["boll_low"]) / x["boll_mid"].replace(0, pd.NA) * 100
+    # KDJ(9,3,3)
+    ll9 = low.rolling(9).min(); hh9 = high.rolling(9).max()
+    rsv = (close - ll9) / (hh9 - ll9).replace(0, pd.NA) * 100
+    x["kdj_k"] = rsv.ewm(alpha=1/3, adjust=False).mean().fillna(50)
+    x["kdj_d"] = x["kdj_k"].ewm(alpha=1/3, adjust=False).mean().fillna(50)
+    x["kdj_j"] = 3 * x["kdj_k"] - 2 * x["kdj_d"]
+    # ATR / directional trend strength (ADX approximation)
+    prev_close = close.shift(1)
+    tr = pd.concat([(high-low).abs(), (high-prev_close).abs(), (low-prev_close).abs()], axis=1).max(axis=1)
+    x["atr14"] = tr.rolling(14).mean()
+    up_move = high.diff(); down_move = -low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    atr_sum = tr.rolling(14).sum().replace(0, pd.NA)
+    plus_di = 100 * plus_dm.rolling(14).sum() / atr_sum; minus_di = 100 * minus_dm.rolling(14).sum() / atr_sum
+    dx = ((plus_di-minus_di).abs() / (plus_di+minus_di).replace(0, pd.NA) * 100)
+    x["adx14"] = dx.rolling(14).mean(); x["plus_di"] = plus_di; x["minus_di"] = minus_di
+    # CCI / WR
+    tp = (high + low + close) / 3
+    ma_tp = tp.rolling(14).mean(); md = (tp-ma_tp).abs().rolling(14).mean().replace(0, pd.NA)
+    x["cci14"] = (tp-ma_tp) / (0.015 * md)
+    hh14 = high.rolling(14).max(); ll14 = low.rolling(14).min()
+    x["wr14"] = -100 * (hh14-close) / (hh14-ll14).replace(0, pd.NA)
+    # OBV / MFI
+    direction = close.diff().fillna(0).apply(lambda v: 1 if v > 0 else (-1 if v < 0 else 0))
+    x["obv"] = (volume * direction).cumsum(); x["obv_ma10"] = x["obv"].rolling(10).mean()
+    raw_money = tp * volume; tp_delta = tp.diff()
+    pos_money = raw_money.where(tp_delta > 0, 0.0).rolling(14).sum(); neg_money = raw_money.where(tp_delta < 0, 0.0).rolling(14).sum().abs()
+    money_ratio = pos_money / neg_money.replace(0, pd.NA)
+    x["mfi14"] = (100 - 100/(1+money_ratio)).fillna(50)
+    # Bias and volume
+    for p in (6, 12, 24):
+        ma = close.rolling(p).mean(); x[f"bias{p}"] = (close-ma) / ma.replace(0, pd.NA) * 100
+    x["vol_ma5"] = volume.rolling(5).mean(); x["vol_ratio5"] = volume / x["vol_ma5"].replace(0, pd.NA)
     return x
 
 
@@ -199,7 +238,7 @@ def _frame_payload(df: pd.DataFrame, label: str, max_rows: int = 100) -> Dict[st
     offset = max(0, len(x) - max_rows)
     rows = []
     for _, r in x.tail(max_rows).iterrows():
-        rows.append({k: (str(r[k]) if k == "date" else round(n(r[k]), 4)) for k in ["date", "open", "close", "high", "low", "volume", "amount", "ma5", "ma10", "ma20", "ma60", "dif", "dea", "macd", "rsi14"]})
+        rows.append({k: (str(r[k]) if k == "date" else round(n(r[k]), 4)) for k in ["date", "open", "close", "high", "low", "volume", "amount", "ma5", "ma10", "ma20", "ma60", "dif", "dea", "macd", "rsi14", "boll_mid", "boll_up", "boll_low", "kdj_k", "kdj_d", "kdj_j", "atr14", "adx14", "plus_di", "minus_di", "cci14", "wr14", "obv", "obv_ma10", "mfi14", "bias6", "bias12", "bias24"]})
     def rb(obj: Dict[str, Any]) -> Dict[str, Any]:
         y = dict(obj)
         for key in ("i", "start", "end"):
@@ -229,7 +268,8 @@ def _condition(label: str, ok: Optional[bool], detail: str) -> Dict[str, Any]:
 def analyze_stock(
     df: pd.DataFrame, *, code: str, name: str = "", industry: str = "",
     event_hits: Optional[List[str]] = None, market_score: Optional[float] = None,
-    market_stage: str = "",
+    market_stage: str = "", market_context: Optional[Dict[str, Any]] = None,
+    sector_relations: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     if df is None or len(df) < 30:
         return {"error": "历史K线不足，至少需要30个交易日"}
@@ -241,6 +281,13 @@ def analyze_stock(
     dif, dea, macd = n(last.dif), n(last.dea), n(last.macd)
     rsi = n(last.rsi14, 50)
     vr = n(last.vol_ratio5, 1)
+    boll_mid, boll_up, boll_low = n(last.boll_mid), n(last.boll_up), n(last.boll_low)
+    k, d, j = n(last.kdj_k, 50), n(last.kdj_d, 50), n(last.kdj_j, 50)
+    atr, adx = n(last.atr14), n(last.adx14)
+    plus_di, minus_di = n(last.plus_di), n(last.minus_di)
+    cci, wr, mfi = n(last.cci14), n(last.wr14, -50), n(last.mfi14, 50)
+    obv, obv_ma10 = n(last.obv), n(last.obv_ma10)
+    bias6, bias12, bias24 = n(last.bias6), n(last.bias12), n(last.bias24)
     ret20 = (price / n(x.close.iloc[-21]) - 1) * 100 if len(x) >= 21 and n(x.close.iloc[-21]) else 0
     h20 = n(x.high.tail(20).max())
     l20 = n(x.low.tail(20).min())
@@ -281,6 +328,20 @@ def analyze_stock(
     if price >= h20 * .985:
         trend_score += 8
         tech.append("接近20日阶段高位")
+    if boll_mid and price >= boll_mid:
+        tech.append(f"BOLL位于中轨上方，上轨 {boll_up:.2f}" if boll_up else "BOLL位于中轨上方")
+    if k > d and 25 <= k <= 85:
+        trend_score += 4; tech.append(f"KDJ K>D（{k:.1f}/{d:.1f}）")
+    elif j > 100:
+        risks.append(f"KDJ J={j:.1f}，短线偏热")
+    if adx >= 25:
+        trend_score += 4; tech.append(f"ADX14={adx:.1f}，趋势强度较高")
+    if obv > obv_ma10 and obv_ma10 != 0:
+        trend_score += 3; tech.append("OBV位于10日均线上方，量价累积偏正")
+    if mfi >= 80:
+        risks.append(f"MFI14={mfi:.1f}，资金流指标偏热")
+    if abs(bias6) >= 8:
+        risks.append(f"BIAS6={bias6:+.1f}%，短期乖离较大")
     trend_score = max(0, min(100, trend_score))
 
     chan = chan_read(x)
@@ -333,7 +394,7 @@ def analyze_stock(
 
     rows = []
     for _, r in x.tail(100).iterrows():
-        rows.append({k: (str(r[k]) if k == "date" else round(n(r[k]), 4)) for k in ["date", "open", "close", "high", "low", "volume", "amount", "ma5", "ma10", "ma20", "ma60", "dif", "dea", "macd", "rsi14"]})
+        rows.append({k: (str(r[k]) if k == "date" else round(n(r[k]), 4)) for k in ["date", "open", "close", "high", "low", "volume", "amount", "ma5", "ma10", "ma20", "ma60", "dif", "dea", "macd", "rsi14", "boll_mid", "boll_up", "boll_low", "kdj_k", "kdj_d", "kdj_j", "atr14", "adx14", "plus_di", "minus_di", "cci14", "wr14", "obv", "obv_ma10", "mfi14", "bias6", "bias12", "bias24"]})
 
     # Rebase indices because rows only includes x.tail(100).
     offset = max(0, len(x) - 100)
@@ -356,10 +417,71 @@ def analyze_stock(
         "weekly": _frame_payload(weekly_df, "周线·大级别", 80),
     }
 
+    # Technical indicator matrix for the stock-detail dashboard.
+    def card(name_: str, value: str, state: str, note_: str) -> Dict[str, str]:
+        return {"name": name_, "value": value, "state": state, "note": note_}
+    indicator_cards = [
+        card("均线", f"MA5 {ma5:.2f} / MA20 {ma20:.2f}", "strong" if ma5>ma10>ma20 else ("weak" if price<ma20 else "neutral"), "观察短中期排列与价格所在位置"),
+        card("MACD", f"DIF {dif:.3f} / DEA {dea:.3f}", "strong" if dif>dea and macd>=0 else ("weak" if dif<dea and macd<0 else "neutral"), "动能与零轴位置联动判断"),
+        card("RSI14", f"{rsi:.1f}", "hot" if rsi>=75 else ("weak" if rsi<=35 else "neutral"), ">75偏热，<35偏弱，仅作强弱参考"),
+        card("BOLL", f"{boll_low:.2f} / {boll_mid:.2f} / {boll_up:.2f}", "strong" if boll_mid and price>boll_mid else "weak", f"带宽 {n(last.boll_width):.1f}%"),
+        card("KDJ", f"K {k:.1f} / D {d:.1f} / J {j:.1f}", "strong" if k>d and j<100 else ("hot" if j>=100 else "neutral"), "关注金叉、钝化与高位超买"),
+        card("ADX14", f"{adx:.1f}", "strong" if adx>=25 and plus_di>=minus_di else ("weak" if adx>=25 and plus_di<minus_di else "neutral"), f"+DI {plus_di:.1f} / -DI {minus_di:.1f}"),
+        card("ATR14", f"{atr:.2f}", "neutral", f"约占现价 {(atr/max(price,1e-9))*100:.1f}% · 衡量波动而非方向"),
+        card("CCI14", f"{cci:.1f}", "hot" if cci>150 else ("weak" if cci<-100 else "neutral"), "极端值提示短期加速/超跌"),
+        card("WR14", f"{wr:.1f}", "hot" if wr>-20 else ("weak" if wr<-80 else "neutral"), "接近0偏强热，接近-100偏弱"),
+        card("MFI14", f"{mfi:.1f}", "hot" if mfi>=80 else ("weak" if mfi<=25 else "neutral"), "结合价格与成交量观察资金流强弱"),
+        card("OBV", "高于均线" if obv>obv_ma10 else "低于均线", "strong" if obv>obv_ma10 else "weak", "量价累积方向与OBV 10日均线比较"),
+        card("BIAS", f"6日 {bias6:+.1f}% / 12日 {bias12:+.1f}%", "hot" if abs(bias6)>=8 else "neutral", f"24日 {bias24:+.1f}% · 关注乖离过大"),
+    ]
+
+    mc = market_context or {}
+    upc, downc = mc.get("up_count"), mc.get("down_count")
+    breadth = None
+    try:
+        if upc is not None and downc is not None and float(upc)+float(downc)>0:
+            breadth = float(upc)/(float(upc)+float(downc))*100
+    except Exception:
+        breadth = None
+    mscore = market_score if market_score is not None else mc.get("score")
+    market_state = "偏强" if mscore is not None and float(mscore)>=60 else ("偏弱" if mscore is not None and float(mscore)<40 else "中性")
+    market_linkage = {
+        "score": mscore, "stage": market_stage or str(mc.get("stage") or ""), "state": market_state,
+        "breadth": round(breadth,1) if breadth is not None else None,
+        "seal_rate": mc.get("seal_rate"), "max_board": mc.get("max_board"), "premium": mc.get("yesterday_premium"),
+        "summary": f"大盘环境{market_state}" + (f"，情绪 {float(mscore):.0f}/100（{market_stage or mc.get('stage') or '未标注'}）" if mscore is not None else "") + (f"，上涨占比 {breadth:.1f}%" if breadth is not None else "") + "。个股技术信号需与市场承接共同确认。",
+    }
+    rels = sector_relations or []
+    valid_rels = [r for r in rels if r.get("heat") is not None]
+    valid_rels.sort(key=lambda r: float(r.get("heat") or 0), reverse=True)
+    hot = valid_rels[:6]
+    avg_heat = sum(float(r.get("heat") or 0) for r in hot)/len(hot) if hot else None
+    avg_pct = sum(float(r.get("pct") or 0) for r in hot)/len(hot) if hot else None
+    topic_state = "共振较强" if avg_heat is not None and avg_heat>=70 and (avg_pct or 0)>0 else ("题材偏弱" if avg_heat is not None and avg_heat<45 else "待确认")
+    topic_linkage = {
+        "state": topic_state, "avg_heat": round(avg_heat,1) if avg_heat is not None else None,
+        "avg_pct": round(avg_pct,2) if avg_pct is not None else None, "top": hot,
+        "summary": (f"所属高相关行业/概念平均热度 {avg_heat:.1f}，平均涨幅 {avg_pct:+.2f}%，当前判为{topic_state}。" if avg_heat is not None else "所属题材已有真实关系映射，但暂缺对应板块热度快照。"),
+    }
+    # Strategy confidence is a research ranking, not a probability of profit.
+    market_component = float(mscore) if mscore is not None else 50.0
+    topic_component = float(avg_heat) if avg_heat is not None else 45.0
+    chan_bonus = min(8.0, 4.0 * len(chan.get("signals", [])))
+    risk_penalty = min(18.0, 3.0 * len(risks))
+    confidence_score = max(0.0, min(100.0, trend_score * 0.48 + market_component * 0.22 + topic_component * 0.22 + chan_bonus - risk_penalty))
+    confidence_level = "高置信候选" if confidence_score >= 75 else ("观察区" if confidence_score >= 60 else "暂缓区")
+    composite = {
+        "technical_score": round(trend_score,1), "market_state": market_state, "topic_state": topic_state,
+        "chan_signals": [x.get("type") for x in chan.get("signals", [])],
+        "confidence_score": round(confidence_score,1), "confidence_level": confidence_level,
+        "summary": f"技术结构 {trend_score:.0f}/100；大盘{market_state}；题材{topic_state}；策略置信度 {confidence_score:.1f}/100（{confidence_level}）；" + ("缠论近似出现"+"/".join(x.get("type","") for x in chan.get("signals",[])) if chan.get("signals") else "当前未出现二/三买近似信号") + "。评分是多维研究排序，不代表收益概率或确定买点。",
+    }
+
     return {
         "code": code, "name": name, "industry": industry, "price": round(price, 2), "trend_score": round(trend_score, 1),
         "summary": f"当前价格 {price:.2f}；20日涨幅 {ret20:+.1f}%；技术面评分 {trend_score:.0f}/100。",
-        "technical": {"ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2), "dif": round(dif, 4), "dea": round(dea, 4), "macd": round(macd, 4), "rsi14": round(rsi, 1), "vol_ratio5": round(vr, 2), "ret20": round(ret20, 2), "high20": round(h20, 2), "low20": round(l20, 2), "high60": round(h60, 2)},
+        "technical": {"ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2), "dif": round(dif, 4), "dea": round(dea, 4), "macd": round(macd, 4), "rsi14": round(rsi, 1), "vol_ratio5": round(vr, 2), "ret20": round(ret20, 2), "high20": round(h20, 2), "low20": round(l20, 2), "high60": round(h60, 2), "boll_mid": round(boll_mid,2), "boll_up": round(boll_up,2), "boll_low": round(boll_low,2), "kdj_k": round(k,1), "kdj_d": round(d,1), "kdj_j": round(j,1), "atr14": round(atr,2), "adx14": round(adx,1), "cci14": round(cci,1), "wr14": round(wr,1), "mfi14": round(mfi,1), "bias6": round(bias6,2), "bias12": round(bias12,2), "bias24": round(bias24,2)},
+        "indicator_cards": indicator_cards, "market_linkage": market_linkage, "topic_linkage": topic_linkage, "composite_analysis": composite,
         "signals": tech, "risks": risks, "chan": chan_out, "chan_text": chan_text,
         "chan_conditions": conditions, "signal_checks": checks,
         "support": support, "resistance": resistance, "scenarios": scenarios,

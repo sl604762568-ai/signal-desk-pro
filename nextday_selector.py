@@ -218,7 +218,7 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
             "code":str(s.get("code",'')).zfill(6),"name":s.get("name"),"industry":s.get("industry",''),
             "price":n(s.get("price")),"pct":pct,"amount":amt,"turnover_rate":tr,"volume_ratio":round(st["vr"],2),
             "float_market_cap_yi":round(st["float_cap_yi"],1),"market_cap_yi":round(st["total_cap_yi"],1),
-            "score":round(clamp(total),1),"market_score":round(market_component,1),"sector_score":round(sector,1),
+            "score":round(clamp(total),1),"confidence_score":round(clamp(total),1),"confidence_level":("高置信候选" if clamp(total)>=75 else "观察区" if clamp(total)>=60 else "暂缓区"),"market_score":round(market_component,1),"sector_score":round(sector,1),
             "sector_memberships":memberships[:5],"sector_name":(memberships[0].get("name") if memberships else str(s.get("industry",''))),
             "volume_price_score":round(st["score"],1),"short_term_elasticity":round(st["score"],1),"technical_score":round(tech["score"],1),
             "execution_state":"正式观察" if market_gate else "观察池",
@@ -257,5 +257,5 @@ def build_next5(market: Dict[str,Any], news: Dict[str,Any], history_fetcher, lim
         "environment":env,"picks":out,"scanned":len(rows),"universe":len(pool),
         "excluded":"已排除688开头、ST/退市、股价>80元、低流动性；有流通市值数据时优先保留约10~320亿区间。",
         "model_note":"三级漏斗：市场环境门槛 → 高热板块真实成分股 → 量价/技术面确认。股价绝对值不参与正向评分；量价使用量比、相对均量、换手与成交额区间。",
-        "note":"5只股票是规则引擎生成的次日研究候选，不是买入指令；开盘后仍需核对指数、板块强弱、竞价和实际成交。"
+        "note":"策略置信度分档：≥75高置信候选，60–74.9观察区，<60暂缓区。评分是规则引擎的多维研究排序，不代表收益概率、确定买点或加仓指令；开盘后仍需核对指数、板块、竞价和实际成交。"
     }
